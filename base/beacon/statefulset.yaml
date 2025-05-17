@@ -22,7 +22,7 @@ spec:
         emptyDir: {}
       - name: env-share
         emptyDir: {}
-      - name: ethereum-config # This will be a PVC from volumeClaimTemplates
+      # - name: ethereum-config
       - name: git-ssh-auth
         secret:
           secretName: gitlab-repo-ssh-key
@@ -31,80 +31,83 @@ spec:
         secret:
           secretName: jwtsecret
           defaultMode: 0o400
+      - name: persistent-storage
+        persistentVolumeClaim:
+          claimName: efs-claim
 
       initContainers:
       # InitContainer 1: Sync config files from S3
-      - name: gitlab-config-cloner
-        image: alpine/git:latest
-          # A common image with git. Others: bitnami/git, registry.k8s.io/git-sync/git-sync
-          # To ensure SSH client has correct permissions and config:
-          # We will create a custom SSH script that git will use.
-        env:
-        - name: GIT_SSH_COMMAND
-          value: "ssh -o UserKnownHostsFile=/etc/git-secret/known_hosts -i /etc/git-secret/ssh-privatekey"
-            # For git-sync image, you might use its specific env vars like GIT_SYNC_REPO, GIT_SYNC_BRANCH, GIT_SYNC_ROOT, etc.
-            # and it handles the SSH key via /etc/git-secret/ssh
-        command:
-        - /bin/sh
-        - -c
-        - |
-          set -e  # Exit immediately if a command exits with a non-zero status.
-          set -x  # Print each command before executing it (for debugging, can be removed in production).
+      # - name: gitlab-config-cloner
+      #   image: alpine/git:latest
+      #     # A common image with git. Others: bitnami/git, registry.k8s.io/git-sync/git-sync
+      #     # To ensure SSH client has correct permissions and config:
+      #     # We will create a custom SSH script that git will use.
+      #   env:
+      #   - name: GIT_SSH_COMMAND
+      #     value: "ssh -o UserKnownHostsFile=/etc/git-secret/known_hosts -i /etc/git-secret/ssh-privatekey"
+      #       # For git-sync image, you might use its specific env vars like GIT_SYNC_REPO, GIT_SYNC_BRANCH, GIT_SYNC_ROOT, etc.
+      #       # and it handles the SSH key via /etc/git-secret/ssh
+      #   command:
+      #   - /bin/sh
+      #   - -c
+      #   - |
+      #     set -e  # Exit immediately if a command exits with a non-zero status.
+      #     set -x  # Print each command before executing it (for debugging, can be removed in production).
 
-          # Install rsync
-          apk add --no-cache rsync
+      #     # Install rsync
+      #     apk add --no-cache rsync
 
-          CONFIG_DIR="/config"
-          REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
-          TEMP_CLONE_DIR="/tmp/git-repo-clone"
-          SOURCE_SUBDIR_IN_REPO="config/metadata"
+      #     CONFIG_DIR="/config"
+      #     REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
+      #     TEMP_CLONE_DIR="/tmp/git-repo-clone"
+      #     SOURCE_SUBDIR_IN_REPO="config/metadata"
 
-          echo "Preparing configuration directory: $CONFIG_DIR for repository $REPO_URL"
+      #     echo "Preparing configuration directory: $CONFIG_DIR for repository $REPO_URL"
 
-          # Clean the target /config directory (mounted PVC) before syncing.
-          # This ensures it only contains files from the current version of the repo's metadata.
-          if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
-            echo "Configuration directory $CONFIG_DIR is not empty. Cleaning its contents..."
-            # Remove all files and subdirectories within $CONFIG_DIR without deleting $CONFIG_DIR itself.
-            find "$CONFIG_DIR" -mindepth 1 -delete
-          else
-            echo "Configuration directory $CONFIG_DIR is already empty or does not exist (it will be created by the mount)."
-          fi
-          # Ensure $CONFIG_DIR exists (it's a mount point, so it should, but good to be safe)
-          mkdir -p "$CONFIG_DIR"
+      #     # Clean the target /config directory (mounted PVC) before syncing.
+      #     # This ensures it only contains files from the current version of the repo's metadata.
+      #     if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
+      #       echo "Configuration directory $CONFIG_DIR is not empty. Cleaning its contents..."
+      #       # Remove all files and subdirectories within $CONFIG_DIR without deleting $CONFIG_DIR itself.
+      #       find "$CONFIG_DIR" -mindepth 1 -delete
+      #     else
+      #       echo "Configuration directory $CONFIG_DIR is already empty or does not exist (it will be created by the mount)."
+      #     fi
+      #     # Ensure $CONFIG_DIR exists (it's a mount point, so it should, but good to be safe)
+      #     mkdir -p "$CONFIG_DIR"
 
-          echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
-          # Clone the full repository into a temporary directory. --depth 1 for shallow clone.
-          git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
+      #     echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
+      #     # Clone the full repository into a temporary directory. --depth 1 for shallow clone.
+      #     git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
 
-          REPO_SOURCE_PATH="$TEMP_CLONE_DIR/$SOURCE_SUBDIR_IN_REPO"
+      #     REPO_SOURCE_PATH="$TEMP_CLONE_DIR/$SOURCE_SUBDIR_IN_REPO"
 
-          if [ -d "$REPO_SOURCE_PATH" ]; then
-            echo "Syncing contents of $REPO_SOURCE_PATH to $CONFIG_DIR using rsync..."
-            # Use rsync to copy the contents of the 'metadata' subdirectory to '/config'
-            # The trailing slash on the source path is important for rsync to copy the *contents*
-            # '--delete' makes it behave like 'aws s3 sync --delete' or 'rsync --delete'
-            rsync -av --delete "$REPO_SOURCE_PATH/" "$CONFIG_DIR/"
-            echo "Successfully synced '$SOURCE_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
-          else
-            echo "Error: Source subdirectory '$SOURCE_SUBDIR_IN_REPO' not found in the cloned repository at $TEMP_CLONE_DIR."
-            # If the metadata folder is optional, you might not want to exit 1 here.
-            # For critical config, exiting is appropriate.
-            exit 1
-          fi
+      #     if [ -d "$REPO_SOURCE_PATH" ]; then
+      #       echo "Syncing contents of $REPO_SOURCE_PATH to $CONFIG_DIR using rsync..."
+      #       # Use rsync to copy the contents of the 'metadata' subdirectory to '/config'
+      #       # The trailing slash on the source path is important for rsync to copy the *contents*
+      #       # '--delete' makes it behave like 'aws s3 sync --delete' or 'rsync --delete'
+      #       rsync -av --delete "$REPO_SOURCE_PATH/" "$CONFIG_DIR/"
+      #       echo "Successfully synced '$SOURCE_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
+      #     else
+      #       echo "Error: Source subdirectory '$SOURCE_SUBDIR_IN_REPO' not found in the cloned repository at $TEMP_CLONE_DIR."
+      #       # If the metadata folder is optional, you might not want to exit 1 here.
+      #       # For critical config, exiting is appropriate.
+      #       exit 1
+      #     fi
 
-          echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
-          rm -rf "$TEMP_CLONE_DIR"
+      #     echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
+      #     rm -rf "$TEMP_CLONE_DIR"
 
-          echo "Git clone and sync of '$SOURCE_SUBDIR_IN_REPO' completed successfully."
-          echo "Final contents of $CONFIG_DIR:"
-          ls -la "$CONFIG_DIR"
-        volumeMounts:
-        - name: git-ssh-auth
-          mountPath: /etc/git-secret # This is where the secret's keys will appear as files        
-          readOnly: true
-        - name: ethereum-config # Mount the config PVC
-          mountPath: /config
+      #     echo "Git clone and sync of '$SOURCE_SUBDIR_IN_REPO' completed successfully."
+      #     echo "Final contents of $CONFIG_DIR:"
+      #     ls -la "$CONFIG_DIR"
+      #   volumeMounts:
+      #   - name: git-ssh-auth
+      #     mountPath: /etc/git-secret # This is where the secret's keys will appear as files        
+      #     readOnly: true
+      #   - name: ethereum-config # Mount the config PVC
+      #     mountPath: /config
       # InitContainer 2: Initialize Geth data directory if needed
       - name: wait-for-geth
         image: busybox:1.36
@@ -196,40 +199,40 @@ spec:
       #   - mountPath: /env
       #     name: env-share
 
-      - name: init-p2p
-        command:
-        - sh
-        - -c
-        - |
-          echo "Namespace: ${POD_NAMESPACE} Pod: ${POD_NAME}"; export EXTERNAL_PORT=$(kubectl get services -n ethereum -l "pod in (${POD_NAME}), type in (p2p)" -o jsonpath='{.items[0].spec.ports[0].nodePort}'); export EXTERNAL_IP=$(kubectl get nodes "${NODE_NAME}" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'); echo "EXTERNAL_PORT=$EXTERNAL_PORT" >  /env/init-nodeport; echo "EXTERNAL_IP=$EXTERNAL_IP"     >> /env/init-nodeport; cat /env/init-nodeport;
-        env:
-        - name: POD_IP
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: status.podIP
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: metadata.namespace
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: spec.nodeName
-        image: docker.io/bitnami/kubectl:1.24
-        securityContext:
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - mountPath: /env
-          name: env-nodeport
+      # - name: init-p2p
+      #   command:
+      #   - sh
+      #   - -c
+      #   - |
+      #     echo "Namespace: ${POD_NAMESPACE} Pod: ${POD_NAME}"; export EXTERNAL_PORT=$(kubectl get services -n ethereum -l "pod in (${POD_NAME}), type in (p2p)" -o jsonpath='{.items[0].spec.ports[0].nodePort}'); export EXTERNAL_IP=$(kubectl get nodes "${NODE_NAME}" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'); echo "EXTERNAL_PORT=$EXTERNAL_PORT" >  /env/init-nodeport; echo "EXTERNAL_IP=$EXTERNAL_IP"     >> /env/init-nodeport; cat /env/init-nodeport;
+      #   env:
+      #   - name: POD_IP
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: status.podIP
+      #   - name: POD_NAME
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: metadata.name
+      #   - name: POD_NAMESPACE
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: metadata.namespace
+      #   - name: NODE_NAME
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: spec.nodeName
+      #   image: docker.io/bitnami/kubectl:1.24
+      #   securityContext:
+      #     runAsNonRoot: false
+      #     runAsUser: 0
+      #   volumeMounts:
+      #   - mountPath: /env
+      #     name: env-nodeport
 
       containers:
       - name: beacon
@@ -240,16 +243,20 @@ spec:
         args:
         - |
           set -e # Exit on error
-          echo "Sourcing LoadBalancer IP from /env/init-nodeport"
-          if [ -f /env/init-nodeport ]; then
-            . /env/init-nodeport # Source the file to get EXTERNAL_IP
-          else
-            echo "Error: /env/init-nodeport not found. Cannot determine external IP."
+          # echo "Sourcing LoadBalancer IP from /env/init-nodeport"
+          # if [ -f /env/init-nodeport ]; then
+          #   . /env/init-nodeport # Source the file to get EXTERNAL_IP
+          # else
+          #   echo "Error: /env/init-nodeport not found. Cannot determine external IP."
+          #   exit 1
+          # fi
+
+          if [ -z "$EXTERNAL_IP" ]; then # This check will now use the value from ConfigMap
+            echo "Error: EXTERNAL_IP variable not set from ConfigMap. Cannot start Geth."
             exit 1
           fi
-
-          if [ -z "$EXTERNAL_IP" ]; then
-            echo "Error: EXTERNAL_IP variable not set after sourcing. Cannot start Geth."
+          if [ -z "$EXTERNAL_PORT" ]; then # This check will now use the value from ConfigMap
+            echo "Error: EXTERNAL_PORT variable not set from ConfigMap. Cannot start Geth."
             exit 1
           fi
 
@@ -258,7 +265,7 @@ spec:
           # Ensure CHAIN_ID is correctly populated from the envFrom configMapRef.        
           exec lighthouse \
             beacon_node \
-            --datadir=/consensus-data \
+            --datadir=/data/consensus-data \
             --disable-peer-scoring \
             --disable-packet-filter \
             --enable-private-discovery \
@@ -275,7 +282,7 @@ spec:
             --port=9000 \
             --discovery-port=9000 \
             --target-peers=100 \
-            --testnet-dir=/config \
+            --testnet-dir=/data/config \
             --execution-endpoints=http://geth-0.geth:8551 \
             --jwt-secrets=/secret/jwtsecret \
             --suggested-fee-recipient=$(FEE_RECIPIENT) \
@@ -299,24 +306,33 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        - name: EXTERNAL_IP # The variable name your script expects
+          valueFrom:
+            configMapKeyRef:
+              name: external-network-config # Name of the ConfigMap you created
+              key: BEACON_EXTERNAL_IP # Key in the ConfigMap data
+        - name: EXTERNAL_PORT # The variable name your script expects
+          valueFrom:
+            configMapKeyRef:
+              name: external-network-config # Name of the ConfigMap
+              key: BEACON_EXTERNAL_PORT
         envFrom:
         - configMapRef:
             name: env-vars # Load FEE_RECIPIENT etc.
         volumeMounts:
-        - name: consensus-data # Mount consensus data PVC
-          mountPath: /consensus-data
+        # - name: consensus-data # Mount consensus data PVC
+        #   mountPath: /consensus-data
         - name: lighthouse-data # Mount lighthouse internal data PVC
           mountPath: /root/.lighthouse # Default path for lighthouse state
-        - name: ethereum-config # Mount shared config PVC
-          mountPath: /config
+        # - name: ethereum-config # Mount shared config PVC
+        #   mountPath: /config
         - name: env-nodeport
           mountPath: /env
         - name: jwtsecret-volume
           mountPath: "/secret"
           readOnly: true
-        # - name: jwt-secret-volume
-        #   mountPath: "/secret"
-        #   readOnly: true
+        - name: persistent-storage
+          mountPath: /data
         # readinessProbe:
         #   httpGet:
         #     path: /lighthouse/health
@@ -329,28 +345,20 @@ spec:
         #     port: http-api
         #   initialDelaySeconds: 30
         #   periodSeconds: 30
-  volumeClaimTemplates:
-  - metadata:
-      name: ethereum-config
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      storageClassName: gp2
-      resources:
-        requests:
-          storage: 1Gi
-  - metadata:
-      name: consensus-data # PVC for consensus chain data
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      storageClassName: gp3 # Or your preferred StorageClass
-      resources:
-        requests:
-          storage: 200Gi # Adjust size as needed
-  # - metadata:
-  #     name: lighthouse-data
-  #   spec:
-  #     accessModes: [ "ReadWriteOnce" ]
-  #     storageClassName: gp3
-  #     resources:
-  #       requests:
-  #         storage: 50Gi
+        # volumeClaimTemplates:
+        # - metadata:
+        #     name: ethereum-config
+        #   spec:
+        #     accessModes: [ "ReadWriteOnce" ]
+        #     storageClassName: gp2
+        #     resources:
+        #       requests:
+        #         storage: 1Gi
+        # - metadata:
+        #     name: consensus-data # PVC for consensus chain data
+        #   spec:
+        #     accessModes: [ "ReadWriteOnce" ]
+        #     storageClassName: gp3 # Or your preferred StorageClass
+        #     resources:
+        #       requests:
+        #         storage: 200Gi # Adjust size as needed

@@ -20,8 +20,8 @@ spec:
         emptyDir: {}
       - name: env-share
         emptyDir: {}
-      - name: execution-data # This will be a PVC from volumeClaimTemplates
-      - name: ethereum-config # This will be a PVC from volumeClaimTemplates
+      # - name: execution-data 
+      # - name: ethereum-config 
       - name: git-ssh-auth
         secret:
           secretName: gitlab-repo-ssh-key
@@ -30,6 +30,9 @@ spec:
         secret:
           secretName: jwtsecret
           defaultMode: 0o400
+      - name: persistent-storage
+        persistentVolumeClaim:
+          claimName: efs-claim
 
       initContainers:
       - name: gitlab-config-cloner
@@ -52,80 +55,252 @@ spec:
           # Install rsync
           apk add --no-cache rsync
 
-          CONFIG_DIR="/config"
+          CONFIG_DIR="/data/config"
+          KEYS_DIR="/data/validator-keys"
           REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
           TEMP_CLONE_DIR="/tmp/git-repo-clone"
-          SOURCE_SUBDIR_IN_REPO="config/metadata"
+          CONFIG_SUBDIR_IN_REPO="config/metadata"
+          KEYS_SUBDIR_IN_REPO="vc/data"
 
-          echo "Preparing configuration directory: $CONFIG_DIR for repository $REPO_URL"
+          CLONE_PERFORMED=false
+          REPO_CLONED_SUCCESSFULLY=false
 
-          # Clean the target /config directory (mounted PVC) before syncing.
-          # This ensures it only contains files from the current version of the repo's metadata.
-          if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
-            echo "Configuration directory $CONFIG_DIR is not empty. Cleaning its contents..."
-            # Remove all files and subdirectories within $CONFIG_DIR without deleting $CONFIG_DIR itself.
-            find "$CONFIG_DIR" -mindepth 1 -delete
-          else
-            echo "Configuration directory $CONFIG_DIR is already empty or does not exist (it will be created by the mount)."
-          fi
-          # Ensure $CONFIG_DIR exists (it's a mount point, so it should, but good to be safe)
+          # Ensure target directories exist (they are mount points from the PVC)
           mkdir -p "$CONFIG_DIR"
+          mkdir -p "$KEYS_DIR"
 
-          echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
-          # Clone the full repository into a temporary directory. --depth 1 for shallow clone.
-          git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
+          # Function to clone the repository
+          clone_repo() {
+            if [ ! -d "$TEMP_CLONE_DIR/.git" ]; then # Check if already cloned properly
+              echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
+              # Clean up any partial clone before attempting a new one
+              rm -rf "$TEMP_CLONE_DIR"
+              git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
+              CLONE_PERFORMED=true # Mark that a clone attempt was made
+              REPO_CLONED_SUCCESSFULLY=true # Assume success, will be clear on rsync path check
+              echo "Repository cloned."
+            else
+              echo "Repository already cloned to $TEMP_CLONE_DIR."
+              REPO_CLONED_SUCCESSFULLY=true # Already successfully cloned
+            fi
+          }
 
-          REPO_SOURCE_PATH="$TEMP_CLONE_DIR/$SOURCE_SUBDIR_IN_REPO"
-
-          if [ -d "$REPO_SOURCE_PATH" ]; then
-            echo "Syncing contents of $REPO_SOURCE_PATH to $CONFIG_DIR using rsync..."
-            # Use rsync to copy the contents of the 'metadata' subdirectory to '/config'
-            # The trailing slash on the source path is important for rsync to copy the *contents*
-            # '--delete' makes it behave like 'aws s3 sync --delete' or 'rsync --delete'
-            rsync -av --delete "$REPO_SOURCE_PATH/" "$CONFIG_DIR/"
-            echo "Successfully synced '$SOURCE_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
+          # Process /data/config
+          echo "Checking configuration directory: $CONFIG_DIR"
+          if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
+            echo "Configuration directory $CONFIG_DIR is not empty. Skipping rewrite."
           else
-            echo "Error: Source subdirectory '$SOURCE_SUBDIR_IN_REPO' not found in the cloned repository at $TEMP_CLONE_DIR."
-            # If the metadata folder is optional, you might not want to exit 1 here.
-            # For critical config, exiting is appropriate.
-            exit 1
+            echo "Configuration directory $CONFIG_DIR is empty or does not exist. Attempting to populate from git."
+            clone_repo # Clone only if needed and not already cloned
+            if [ "$REPO_CLONED_SUCCESSFULLY" = true ]; then
+              REPO_CONFIG_SOURCE_PATH="$TEMP_CLONE_DIR/$CONFIG_SUBDIR_IN_REPO"
+              if [ -d "$REPO_CONFIG_SOURCE_PATH" ]; then
+                echo "Syncing contents of $REPO_CONFIG_SOURCE_PATH to $CONFIG_DIR using rsync (no delete)..."
+                rsync -av "$REPO_CONFIG_SOURCE_PATH/" "$CONFIG_DIR/" # No --delete
+                echo "Successfully synced '$CONFIG_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
+              else
+                echo "Error: Source subdirectory '$REPO_CONFIG_SOURCE_PATH' not found in the cloned repository."
+                echo "Configuration directory $CONFIG_DIR will remain empty."
+                # Depending on criticality, you might want to exit 1 here if config is essential on first run
+                # exit 1
+              fi
+            else
+              echo "Skipping population of $CONFIG_DIR due to repository clone failure."
+            fi
           fi
 
-          echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
-          rm -rf "$TEMP_CLONE_DIR"
+          # Process /data/validator-keys
+          echo "Checking validator keys directory: $KEYS_DIR"
+          if [ -d "$KEYS_DIR" ] && [ "$(ls -A $KEYS_DIR)" ]; then
+            echo "Validator keys directory $KEYS_DIR is not empty. Skipping rewrite."
+          else
+            echo "Validator keys directory $KEYS_DIR is empty or does not exist. Attempting to populate from git."
+            clone_repo # Clone only if needed and not already cloned
+            if [ "$REPO_CLONED_SUCCESSFULLY" = true ]; then
+              REPO_KEYS_SOURCE_PATH="$TEMP_CLONE_DIR/$KEYS_SUBDIR_IN_REPO"
+              if [ -d "$REPO_KEYS_SOURCE_PATH" ]; then
+                echo "Syncing contents of $REPO_KEYS_SOURCE_PATH to $KEYS_DIR using rsync (no delete)..."
+                rsync -av "$REPO_KEYS_SOURCE_PATH/" "$KEYS_DIR/" # No --delete
+                echo "Successfully synced '$KEYS_SUBDIR_IN_REPO' contents to $KEYS_DIR."
+              else
+                echo "Error: Source subdirectory '$REPO_KEYS_SOURCE_PATH' not found in the cloned repository."
+                echo "Validator keys directory $KEYS_DIR will remain empty."
+                # Depending on criticality, you might want to exit 1 here if keys are essential on first run
+                # exit 1
+              fi
+            else
+              echo "Skipping population of $KEYS_DIR due to repository clone failure."
+            fi
+          fi
 
-          echo "Git clone and sync of '$SOURCE_SUBDIR_IN_REPO' completed successfully."
-          echo "Final contents of $CONFIG_DIR:"
-          ls -la "$CONFIG_DIR"
+          if [ "$CLONE_PERFORMED" = true ] && [ -d "$TEMP_CLONE_DIR" ]; then
+            echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
+            rm -rf "$TEMP_CLONE_DIR"
+          fi
+
+          echo "Init container 'gitlab-config-cloner' finished processing."
+          echo "Final contents of $CONFIG_DIR (ls -la):"
+          ls -la "$CONFIG_DIR" || echo "$CONFIG_DIR not listable or empty"
+          echo "Final contents of $KEYS_DIR (ls -la):"
+          ls -la "$KEYS_DIR" || echo "$KEYS_DIR not listable or empty"
+
+
+
+          # echo "Preparing configuration directory: $CONFIG_DIR for repository $REPO_URL"
+
+          # # Clean the target /config directory (mounted PVC) before syncing.
+          # # This ensures it only contains files from the current version of the repo's metadata.
+          # if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
+          #   echo "Configuration directory $CONFIG_DIR is not empty. Cleaning its contents..."
+          #   # Remove all files and subdirectories within $CONFIG_DIR without deleting $CONFIG_DIR itself.
+          #   find "$CONFIG_DIR" -mindepth 1 -delete
+          # else
+          #   echo "Configuration directory $CONFIG_DIR is already empty or does not exist (it will be created by the mount)."
+          # fi
+          # # Ensure $CONFIG_DIR exists (it's a mount point, so it should, but good to be safe)
+          # mkdir -p "$CONFIG_DIR"
+
+          # echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
+          # # Clone the full repository into a temporary directory. --depth 1 for shallow clone.
+          # git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
+
+          # REPO_CONFIG_SOURCE_PATH="$TEMP_CLONE_DIR/$CONFIG_SUBDIR_IN_REPO"
+          # REPO_KEYS_SOURCE_PATH="$TEMP_CLONE_DIR/$KEYS_SUBDIR_IN_REPO"
+
+          # if [ -d "$REPO_CONFIG_SOURCE_PATH" ]; then
+          #   echo "Syncing contents of $REPO_SOURCE_PATH to $CONFIG_DIR using rsync..."
+          #   # Use rsync to copy the contents of the 'metadata' subdirectory to '/config'
+          #   # The trailing slash on the source path is important for rsync to copy the *contents*
+          #   # '--delete' makes it behave like 'aws s3 sync --delete' or 'rsync --delete'
+          #   rsync -av --delete "$REPO_CONFIG_SOURCE_PATH/" "$CONFIG_DIR/"
+          #   echo "Successfully synced '$CONFIG_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
+          # else
+          #   echo "Error: Source subdirectory '$REPO_CONFIG_SOURCE_PATH' not found in the cloned repository at $TEMP_CLONE_DIR."
+          #   # If the metadata folder is optional, you might not want to exit 1 here.
+          #   # For critical config, exiting is appropriate.
+          #   exit 1
+          # fi
+
+          # if [ -d "$REPO_KEYS_SOURCE_PATH" ]; then
+          #   echo "Syncing contents of $REPO_KEYS_SOURCE_PATH to $KEYS_DIR using rsync..."
+          #   rsync -av --delete "$REPO_KEYS_SOURCE_PATH/" "$KEYS_DIR/"
+          #   echo "Successfully synced '$KEYS_SUBDIR_IN_REPO' contents to $KEYS_DIR."            
+          # else
+          #   echo "Error: Source subdirectory '$REPO_KEYS_SOURCE_PATH' not found in the cloned repository at $TEMP_CLONE_DIR."
+          #   # If the metadata folder is optional, you might not want to exit 1 here.
+          #   # For critical config, exiting is appropriate.
+          #   exit 1
+          # fi
+
+          # echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
+          # rm -rf "$TEMP_CLONE_DIR"
+
+          # echo "Git clone and sync of '$CONFIG_SUBDIR_IN_REPO' completed successfully."
+          # echo "Final contents of $CONFIG_DIR:"
+          # ls -la "$CONFIG_DIR"
+
+          # echo "Git clone and sync of '$KEYS_SUBDIR_IN_REPO' completed successfully."
+          # echo "Final contents of $KEYS_DIR:"
+          # ls -la "$KEYS_DIR"          
         volumeMounts:
         - name: git-ssh-auth
           mountPath: /etc/git-secret # This is where the secret's keys will appear as files        
           readOnly: true
-        - name: ethereum-config # Mount the config PVC
-          mountPath: /config
-      # InitContainer 2: Initialize Geth data directory if needed          
+        - name: persistent-storage
+          mountPath: /data
+        # - name: ethereum-config # Mount the config PVC
+        #   mountPath: /config
+        # - name: validator-keys
+        #   mountPath: /validator-keys
+
+        # - name: gitlab-config-cloner
+        #   image: alpine/git:latest
+        #   env:
+        #   - name: GIT_SSH_COMMAND
+        #     value: "ssh -o UserKnownHostsFile=/etc/git-secret/known_hosts -i /etc/git-secret/ssh-privatekey"
+        #   command:
+        #   - /bin/sh
+        #   - -c
+        #   - |
+        #     set -e  # Exit immediately if a command exits with a non-zero status.
+        #     set -x  # Print each command before executing it (for debugging, can be removed in production).
+
+        #     # Install rsync
+        #     apk add --no-cache rsync
+
+        #     CONFIG_DIR="/data/config"
+        #     REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
+        #     TEMP_CLONE_DIR="/tmp/git-repo-clone"
+        #     SOURCE_SUBDIR_IN_REPO="config/metadata"
+
+        #     echo "Preparing configuration directory: $CONFIG_DIR for repository $REPO_URL"
+
+        #     # Clean the target /config directory (mounted PVC) before syncing.
+        #     # This ensures it only contains files from the current version of the repo's metadata.
+        #     if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
+        #       echo "Configuration directory $CONFIG_DIR is not empty. Cleaning its contents..."
+        #       # Remove all files and subdirectories within $CONFIG_DIR without deleting $CONFIG_DIR itself.
+        #       find "$CONFIG_DIR" -mindepth 1 -delete
+        #     else
+        #       echo "Configuration directory $CONFIG_DIR is already empty or does not exist (it will be created by the mount)."
+        #     fi
+        #     # Ensure $CONFIG_DIR exists (it's a mount point, so it should, but good to be safe)
+        #     mkdir -p "$CONFIG_DIR"
+
+        #     echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
+        #     # Clone the full repository into a temporary directory. --depth 1 for shallow clone.
+        #     git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
+
+        #     REPO_SOURCE_PATH="$TEMP_CLONE_DIR/$SOURCE_SUBDIR_IN_REPO"
+
+        #     if [ -d "$REPO_SOURCE_PATH" ]; then
+        #       echo "Syncing contents of $REPO_SOURCE_PATH to $CONFIG_DIR using rsync..."
+        #       # Use rsync to copy the contents of the 'metadata' subdirectory to '/config'
+        #       # The trailing slash on the source path is important for rsync to copy the *contents*
+        #       # '--delete' makes it behave like 'aws s3 sync --delete' or 'rsync --delete'
+        #       rsync -av --delete "$REPO_SOURCE_PATH/" "$CONFIG_DIR/"
+        #       echo "Successfully synced '$SOURCE_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
+        #     else
+        #       echo "Error: Source subdirectory '$SOURCE_SUBDIR_IN_REPO' not found in the cloned repository at $TEMP_CLONE_DIR."
+        #       # If the metadata folder is optional, you might not want to exit 1 here.
+        #       # For critical config, exiting is appropriate.
+        #       exit 1
+        #     fi
+
+        #     echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
+        #     rm -rf "$TEMP_CLONE_DIR"
+
+        #     echo "Git clone and sync of '$SOURCE_SUBDIR_IN_REPO' completed successfully."
+        #     echo "Final contents of $CONFIG_DIR:"
+        #     ls -la "$CONFIG_DIR"
+        #   volumeMounts:
+        #   - name: git-ssh-auth
+        #     mountPath: /etc/git-secret 
+        #     readOnly: true
+        #   - name: persistent-storage
+        #     mountPath: /data
+        # InitContainer 2: Initialize Geth data directory if needed          
       - name: init-geth
         image: ethereum/client-go
         command: [ "geth" ]
         args:
-        - "--datadir=/execution-data"
+        - "--datadir=/data/execution-data"
         - "init"
-        - "/config/genesis.json"
+        - "/data/config/genesis.json"
         envFrom:
         # Get CHAIN_ID etc. if needed by init (though not strictly needed here)
         - configMapRef:
             name: env-vars
         volumeMounts:
-        - name: execution-data # Mount the data PVC
-          mountPath: /execution-data
-        - name: ethereum-config # Mount the config PVC
-          mountPath: /config
-        # - name: jwt-secret-volume
-        #   mountPath: "/secret"
-        #   readOnly: true
+        # - name: execution-data # Mount the data PVC
+        #   mountPath: /execution-data
+        # - name: ethereum-config # Mount the config PVC
+        #   mountPath: /config
         - name: jwtsecret-volume
           mountPath: "/secret"
           readOnly: true
+        - name: persistent-storage
+          mountPath: /data
       # InitContainer 3: Get NodePort and External IP
       # - name: wait-for-loadbalancer-ip
       #   image: docker.io/bitnami/kubectl:1.32
@@ -213,40 +388,40 @@ spec:
       #   - name: env-nodeport
       #     mountPath: /env
 
-      - name: init-p2p
-        command:
-        - sh
-        - -c
-        - |
-          echo "Namespace: ${POD_NAMESPACE} Pod: ${POD_NAME}"; export EXTERNAL_PORT=$(kubectl get services -n ethereum -l "pod in (${POD_NAME}), type in (p2p)" -o jsonpath='{.items[0].spec.ports[0].nodePort}'); export EXTERNAL_IP=$(kubectl get nodes "${NODE_NAME}" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'); echo "EXTERNAL_PORT=$EXTERNAL_PORT" >  /env/init-nodeport; echo "EXTERNAL_IP=$EXTERNAL_IP"     >> /env/init-nodeport; cat /env/init-nodeport;
-        env:
-        - name: POD_IP
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: status.podIP
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: metadata.namespace
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: spec.nodeName
-        image: docker.io/bitnami/kubectl:1.24
-        securityContext:
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - mountPath: /env
-          name: env-nodeport
+      # - name: init-p2p
+      #   command:
+      #   - sh
+      #   - -c
+      #   - |
+      #     echo "Namespace: ${POD_NAMESPACE} Pod: ${POD_NAME}"; export EXTERNAL_PORT=$(kubectl get services -n ethereum -l "pod in (${POD_NAME}), type in (p2p)" -o jsonpath='{.items[0].spec.ports[0].nodePort}'); export EXTERNAL_IP=$(kubectl get nodes "${NODE_NAME}" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'); echo "EXTERNAL_PORT=$EXTERNAL_PORT" >  /env/init-nodeport; echo "EXTERNAL_IP=$EXTERNAL_IP"     >> /env/init-nodeport; cat /env/init-nodeport;
+      #   env:
+      #   - name: POD_IP
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: status.podIP
+      #   - name: POD_NAME
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: metadata.name
+      #   - name: POD_NAMESPACE
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: metadata.namespace
+      #   - name: NODE_NAME
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: spec.nodeName
+      #   image: docker.io/bitnami/kubectl:1.24
+      #   securityContext:
+      #     runAsNonRoot: false
+      #     runAsUser: 0
+      #   volumeMounts:
+      #   - mountPath: /env
+      #     name: env-nodeport
 
       containers:
       - name: geth
@@ -257,16 +432,20 @@ spec:
         args:
         - |
           set -e # Exit on error
-          echo "Sourcing LoadBalancer IP from /env/init-nodeport"
-          if [ -f /env/init-nodeport ]; then
-            . /env/init-nodeport # Source the file to get EXTERNAL_IP
-          else
-            echo "Error: /env/init-nodeport not found. Cannot determine external IP."
+          # echo "Sourcing LoadBalancer IP from /env/init-nodeport"
+          # if [ -f /env/init-nodeport ]; then
+          #   . /env/init-nodeport # Source the file to get EXTERNAL_IP
+          # else
+          #   echo "Error: /env/init-nodeport not found. Cannot determine external IP."
+          #   exit 1
+          # fi
+
+          if [ -z "$EXTERNAL_IP" ]; then # This check will now use the value from ConfigMap
+            echo "Error: EXTERNAL_IP variable not set from ConfigMap. Cannot start Geth."
             exit 1
           fi
-
-          if [ -z "$EXTERNAL_IP" ]; then
-            echo "Error: EXTERNAL_IP variable not set after sourcing. Cannot start Geth."
+          if [ -z "$EXTERNAL_PORT" ]; then # This check will now use the value from ConfigMap
+            echo "Error: EXTERNAL_PORT variable not set from ConfigMap. Cannot start Geth."
             exit 1
           fi
 
@@ -277,7 +456,7 @@ spec:
             --networkid=${CHAIN_ID} \
             --state.scheme=path \
             --verbosity=3 \
-            --datadir=/execution-data \
+            --datadir=/data/execution-data \
             --nat=extip:${EXTERNAL_IP} \
             --port=${EXTERNAL_PORT} \
             --http \
@@ -328,23 +507,32 @@ spec:
         - configMapRef:
             name: env-vars
         env:
+        - name: EXTERNAL_IP # The variable name your script expects
+          valueFrom:
+            configMapKeyRef:
+              name: external-network-config # Name of the ConfigMap you created
+              key: GETH_EXTERNAL_IP # Key in the ConfigMap data
+        - name: EXTERNAL_PORT # The variable name your script expects
+          valueFrom:
+            configMapKeyRef:
+              name: external-network-config # Name of the ConfigMap
+              key: GETH_EXTERNAL_PORT
         - name: POD_IP
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
         volumeMounts:
-        - name: execution-data
-          mountPath: /execution-data
-        - name: ethereum-config
-          mountPath: /config
+        # - name: execution-data
+        #   mountPath: /execution-data
+        # - name: ethereum-config
+        #   mountPath: /config
         - name: env-nodeport # Mount the shared volume to read the IP
           mountPath: /env
         - name: jwtsecret-volume
           mountPath: "/secret"
           readOnly: true
-        # - name: jwt-secret-volume
-        #   mountPath: "/secret"
-        #   readOnly: true
+        - name: persistent-storage
+          mountPath: /data
         # - name: sidecar
         #   env:
         #   - name: SERVER_BINDADDR
@@ -376,20 +564,20 @@ spec:
         #     periodSeconds: 30
         #     successThreshold: 1
         #     timeoutSeconds: 3
-  volumeClaimTemplates:
-  - metadata:
-      name: ethereum-config
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      storageClassName: gp2
-      resources:
-        requests:
-          storage: 1Gi
-  - metadata:
-      name: execution-data
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      storageClassName: gp3
-      resources:
-        requests:
-          storage: 10Gi
+        # volumeClaimTemplates:
+        # - metadata:
+        #     name: ethereum-config
+        #   spec:
+        #     accessModes: [ "ReadWriteOnce" ]
+        #     storageClassName: gp2
+        #     resources:
+        #       requests:
+        #         storage: 1Gi
+        # - metadata:
+        #     name: execution-data
+        #   spec:
+        #     accessModes: [ "ReadWriteOnce" ]
+        #     storageClassName: gp3
+        #     resources:
+        #       requests:
+        #         storage: 10Gi
