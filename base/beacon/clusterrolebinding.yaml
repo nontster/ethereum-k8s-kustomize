@@ -8,5 +8,5 @@ roleRef:
   name: beacon
 subjects:
 - kind: ServiceAccount
-  name: lighthouse
+  name: beacon
   namespace: ethereum

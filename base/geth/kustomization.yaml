@@ -1,4 +1,6 @@
 resources:
+- clusterrole.yaml
+- clusterrolebinding.yaml
 - service.yaml
 - service-p2p.yaml
 - sa.yaml

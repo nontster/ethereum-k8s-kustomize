@@ -16,6 +16,8 @@ spec:
       serviceAccountName: geth # Service Account
       terminationGracePeriodSeconds: 60
       volumes:
+      - name: env-nodeport
+        emptyDir: {}
       - name: env-share
         emptyDir: {}
       - name: execution-data # This will be a PVC from volumeClaimTemplates
@@ -28,37 +30,8 @@ spec:
         secret:
           secretName: jwtsecret
           defaultMode: 0o400
-      # - name: jwt-secret-volume # Match the volume mount name
-      #   csi:
-      #     driver: secrets-store.csi.k8s.io
-      #     readOnly: true
-      #     volumeAttributes:
-      #       secretProviderClass: "jwt-secret" # Match the name of your SecretProviderClass
 
       initContainers:
-      # InitContainer 1: Sync config files from S3
-      # - name: s3-config-sync
-      #   image: amazon/aws-cli:latest
-      #     # Command to sync files from S3 to the mounted volume
-      #     # Uses 'aws s3 sync' which recursively copies new/updated files
-      #     # '--delete' removes files in the destination that don't exist in the source
-      #     # Consider removing '--delete' if you only want to add/update files
-      #   command: [ "/bin/sh", "-c" ]
-      #   args:
-      #   - >
-      #     aws s3 sync s3://domecloud-ethereum-config-dev/config/metadata /config --delete --exact-timestamps && echo "S3 sync completed successfully."
-      #   env:
-      #   # Explicitly set region if needed, though IRSA often handles this
-      #   - name: AWS_REGION
-      #     value: "ap-southeast-1" # S3 bucket's region
-      #     # These are automatically injected by the EKS Pod Identity Webhook when using IRSA
-      #     # - name: AWS_ROLE_ARN
-      #     #   value: "arn:aws:iam::ACCOUNT_ID:role/MyS3SyncRole" # Handled by annotation usually
-      #     # - name: AWS_WEB_IDENTITY_TOKEN_FILE
-      #     #   value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token" # Handled by webhook
-      #   volumeMounts:
-      #   - name: ethereum-config
-      #     mountPath: /config
       - name: gitlab-config-cloner
         image: alpine/git:latest
           # A common image with git. Others: bitnami/git, registry.k8s.io/git-sync/git-sync
@@ -154,91 +127,126 @@ spec:
           mountPath: "/secret"
           readOnly: true
       # InitContainer 3: Get NodePort and External IP
-      - name: wait-for-loadbalancer-ip
-        image: docker.io/bitnami/kubectl:1.32
+      # - name: wait-for-loadbalancer-ip
+      #   image: docker.io/bitnami/kubectl:1.32
+      #   env:
+      #   - name: POD_NAME # Injected by Downward API
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: metadata.name
+      #   - name: POD_NAMESPACE # Injected by Downward API
+      #     valueFrom:
+      #       fieldRef:
+      #         apiVersion: v1
+      #         fieldPath: metadata.namespace
+      #   command:
+      #   - /bin/sh
+      #   - -c
+      #   - |
+      #     set -e # Exit immediately if a command exits with a non-zero status.
+      #     SERVICE_NAME="${POD_NAME}" # Assumes your LoadBalancer service is named the same as the pod (e.g., geth-0)
+      #     NAMESPACE="${POD_NAMESPACE}"
+      #     RETRY_INTERVAL=10 # seconds
+      #     MAX_RETRIES=36 # 36 retries * 10 seconds = 6 minutes timeout
+      #     OUTPUT_FILE="/env/load_balancer.env"
+
+      #     echo "Starting: Wait for LoadBalancer endpoint for service $SERVICE_NAME in namespace $NAMESPACE (dedicated to pod $POD_NAME)..."
+
+      #     LB_ENDPOINT=""
+      #     RETRY_COUNT=0
+
+      #     while [ -z "$LB_ENDPOINT" ] && [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
+      #       # Try to get IP first
+      #       LB_ENDPOINT=$(kubectl get service "$SERVICE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+
+      #       if [ -z "$LB_ENDPOINT" ]; then
+      #         # If IP is not found, try hostname
+      #         LB_ENDPOINT=$(kubectl get service "$SERVICE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+      #       fi
+
+      #       if [ -z "$LB_ENDPOINT" ]; then
+      #         RETRY_COUNT=$((RETRY_COUNT+1))
+      #         echo "LoadBalancer endpoint not yet available for $SERVICE_NAME. Retrying in $RETRY_INTERVAL seconds... (Attempt ${RETRY_COUNT}/${MAX_RETRIES})"
+      #         sleep "$RETRY_INTERVAL"
+      #       else
+      #         echo "Successfully retrieved LoadBalancer endpoint for $SERVICE_NAME: $LB_ENDPOINT"
+      #       fi
+      #     done
+
+      #     if [ -z "$LB_ENDPOINT" ]; then
+      #       echo "Error: Failed to get LoadBalancer endpoint for $SERVICE_NAME after $MAX_RETRIES attempts. Exiting."
+      #       exit 1
+      #     fi
+
+      #     # Check if LB_ENDPOINT is an IP address or a hostname
+      #     RESOLVED_IP="$LB_ENDPOINT"
+      #     # Basic regex for IP address
+      #     if ! echo "$LB_ENDPOINT" | grep -E -q '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+      #       echo "Endpoint $LB_ENDPOINT is a hostname. Resolving to IP address..."
+      #       # Using 'getent hosts' which is generally available. It might return multiple IPs; we take the first.
+      #       # The bitnami/kubectl image is Debian-based and should have getent.
+      #       IP_FROM_GETENT=$(getent hosts "$LB_ENDPOINT" | awk '{ print $1 }' | head -n 1)
+
+      #       if [ -z "$IP_FROM_GETENT" ]; then
+      #         echo "Warning: 'getent hosts' failed to resolve $LB_ENDPOINT. Trying 'nslookup'..."
+      #         # nslookup might not be in bitnami/kubectl by default, consider adding 'dnsutils' or using an image like alpine/k8s and 'apk add bind-tools'
+      #         # For simplicity, we'll assume getent works or the LB provides an IP directly.
+      #         # If nslookup is needed and not present, this part will fail.
+      #         # Example: IP_FROM_NSLOOKUP=$(nslookup "$LB_ENDPOINT" | awk '/^Address: / { print $2 }' | tail -n1)
+      #         # For now, if getent fails with a hostname, we error out.
+      #         echo "Error: Could not resolve hostname $LB_ENDPOINT using getent. Please ensure DNS resolution tools are available in the init container or the LB provides an IP."
+      #         exit 1
+      #       fi
+      #       RESOLVED_IP="$IP_FROM_GETENT"
+      #       echo "Resolved $LB_ENDPOINT to $RESOLVED_IP"
+      #     fi
+
+      #     echo "Final LoadBalancer IP for $POD_NAME (via $SERVICE_NAME) is: $RESOLVED_IP"
+      #     echo "export EXTERNAL_IP=\"${RESOLVED_IP}\"" > "${OUTPUT_FILE}"
+      #     echo "LoadBalancer IP written to ${OUTPUT_FILE}:"
+      #     cat "${OUTPUT_FILE}"
+      #   securityContext:
+      #     runAsNonRoot: false
+      #     runAsUser: 0
+      #   volumeMounts:
+      #   - name: env-nodeport
+      #     mountPath: /env
+
+      - name: init-p2p
+        command:
+        - sh
+        - -c
+        - |
+          echo "Namespace: ${POD_NAMESPACE} Pod: ${POD_NAME}"; export EXTERNAL_PORT=$(kubectl get services -n ethereum -l "pod in (${POD_NAME}), type in (p2p)" -o jsonpath='{.items[0].spec.ports[0].nodePort}'); export EXTERNAL_IP=$(kubectl get nodes "${NODE_NAME}" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'); echo "EXTERNAL_PORT=$EXTERNAL_PORT" >  /env/init-nodeport; echo "EXTERNAL_IP=$EXTERNAL_IP"     >> /env/init-nodeport; cat /env/init-nodeport;
         env:
-        - name: POD_NAME # Injected by Downward API
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        - name: POD_NAME
           valueFrom:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.name
-        - name: POD_NAMESPACE # Injected by Downward API
+        - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
-        command:
-        - /bin/sh
-        - -c
-        - |
-          set -e # Exit immediately if a command exits with a non-zero status.
-          SERVICE_NAME="${POD_NAME}" # Assumes your LoadBalancer service is named the same as the pod (e.g., geth-0)
-          NAMESPACE="${POD_NAMESPACE}"
-          RETRY_INTERVAL=10 # seconds
-          MAX_RETRIES=36 # 36 retries * 10 seconds = 6 minutes timeout
-          OUTPUT_FILE="/env/load_balancer.env"
-
-          echo "Starting: Wait for LoadBalancer endpoint for service $SERVICE_NAME in namespace $NAMESPACE (dedicated to pod $POD_NAME)..."
-
-          LB_ENDPOINT=""
-          RETRY_COUNT=0
-
-          while [ -z "$LB_ENDPOINT" ] && [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
-            # Try to get IP first
-            LB_ENDPOINT=$(kubectl get service "$SERVICE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
-
-            if [ -z "$LB_ENDPOINT" ]; then
-              # If IP is not found, try hostname
-              LB_ENDPOINT=$(kubectl get service "$SERVICE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            fi
-
-            if [ -z "$LB_ENDPOINT" ]; then
-              RETRY_COUNT=$((RETRY_COUNT+1))
-              echo "LoadBalancer endpoint not yet available for $SERVICE_NAME. Retrying in $RETRY_INTERVAL seconds... (Attempt ${RETRY_COUNT}/${MAX_RETRIES})"
-              sleep "$RETRY_INTERVAL"
-            else
-              echo "Successfully retrieved LoadBalancer endpoint for $SERVICE_NAME: $LB_ENDPOINT"
-            fi
-          done
-
-          if [ -z "$LB_ENDPOINT" ]; then
-            echo "Error: Failed to get LoadBalancer endpoint for $SERVICE_NAME after $MAX_RETRIES attempts. Exiting."
-            exit 1
-          fi
-
-          # Check if LB_ENDPOINT is an IP address or a hostname
-          RESOLVED_IP="$LB_ENDPOINT"
-          # Basic regex for IP address
-          if ! echo "$LB_ENDPOINT" | grep -E -q '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
-            echo "Endpoint $LB_ENDPOINT is a hostname. Resolving to IP address..."
-            # Using 'getent hosts' which is generally available. It might return multiple IPs; we take the first.
-            # The bitnami/kubectl image is Debian-based and should have getent.
-            IP_FROM_GETENT=$(getent hosts "$LB_ENDPOINT" | awk '{ print $1 }' | head -n 1)
-
-            if [ -z "$IP_FROM_GETENT" ]; then
-              echo "Warning: 'getent hosts' failed to resolve $LB_ENDPOINT. Trying 'nslookup'..."
-              # nslookup might not be in bitnami/kubectl by default, consider adding 'dnsutils' or using an image like alpine/k8s and 'apk add bind-tools'
-              # For simplicity, we'll assume getent works or the LB provides an IP directly.
-              # If nslookup is needed and not present, this part will fail.
-              # Example: IP_FROM_NSLOOKUP=$(nslookup "$LB_ENDPOINT" | awk '/^Address: / { print $2 }' | tail -n1)
-              # For now, if getent fails with a hostname, we error out.
-              echo "Error: Could not resolve hostname $LB_ENDPOINT using getent. Please ensure DNS resolution tools are available in the init container or the LB provides an IP."
-              exit 1
-            fi
-            RESOLVED_IP="$IP_FROM_GETENT"
-            echo "Resolved $LB_ENDPOINT to $RESOLVED_IP"
-          fi
-
-          echo "Final LoadBalancer IP for $POD_NAME (via $SERVICE_NAME) is: $RESOLVED_IP"
-          echo "export EXTERNAL_IP=\"${RESOLVED_IP}\"" > "${OUTPUT_FILE}"
-          echo "LoadBalancer IP written to ${OUTPUT_FILE}:"
-          cat "${OUTPUT_FILE}"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        image: docker.io/bitnami/kubectl:1.24
         securityContext:
           runAsNonRoot: false
           runAsUser: 0
         volumeMounts:
         - mountPath: /env
-          name: env-share
+          name: env-nodeport
 
       containers:
       - name: geth
@@ -249,11 +257,11 @@ spec:
         args:
         - |
           set -e # Exit on error
-          echo "Sourcing LoadBalancer IP from /env/load_balancer.env"
-          if [ -f /env/load_balancer.env ]; then
-            . /env/load_balancer.env # Source the file to get EXTERNAL_IP
+          echo "Sourcing LoadBalancer IP from /env/init-nodeport"
+          if [ -f /env/init-nodeport ]; then
+            . /env/init-nodeport # Source the file to get EXTERNAL_IP
           else
-            echo "Error: /env/load_balancer.env not found. Cannot determine external IP."
+            echo "Error: /env/init-nodeport not found. Cannot determine external IP."
             exit 1
           fi
 
@@ -262,15 +270,16 @@ spec:
             exit 1
           fi
 
-          echo "Starting Geth with --nat=extip:${EXTERNAL_IP}"
-          # Note: $(CHAIN_ID) will be expanded if CHAIN_ID is an environment variable available to this shell.
+          echo "Starting Geth with --nat=extip:${EXTERNAL_IP} --port=${EXTERNAL_PORT}"
+          # Note: ${CHAIN_ID} will be expanded if CHAIN_ID is an environment variable available to this shell.
           # Ensure CHAIN_ID is correctly populated from the envFrom configMapRef.
           exec geth \
-            --networkid=$(CHAIN_ID) \
+            --networkid=${CHAIN_ID} \
             --state.scheme=path \
             --verbosity=3 \
             --datadir=/execution-data \
             --nat=extip:${EXTERNAL_IP} \
+            --port=${EXTERNAL_PORT} \
             --http \
             --http.addr=0.0.0.0 \
             --http.port=8545 \
@@ -328,7 +337,7 @@ spec:
           mountPath: /execution-data
         - name: ethereum-config
           mountPath: /config
-        - name: env-share # Mount the shared volume to read the IP
+        - name: env-nodeport # Mount the shared volume to read the IP
           mountPath: /env
         - name: jwtsecret-volume
           mountPath: "/secret"
