@@ -1,0 +1,5 @@
+resources:
+- service.yaml
+- sa.yaml
+- rolebinding.yaml
+- statefulset.yaml

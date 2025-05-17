@@ -1,0 +1,317 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: beacon
+spec:
+  serviceName: beacon
+  replicas: 1
+  selector:
+    matchLabels:
+      app: beacon
+  template:
+    metadata:
+      labels:
+        app: beacon
+    spec:
+      serviceAccountName: beacon
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: lighthouse-data
+        emptyDir: {}
+      - name: env-share
+        emptyDir: {}
+      - name: ethereum-config # This will be a PVC from volumeClaimTemplates
+      - name: git-ssh-auth
+        secret:
+          secretName: gitlab-repo-ssh-key
+          defaultMode: 0o400
+      - name: jwtsecret-volume
+        secret:
+          secretName: jwtsecret
+          defaultMode: 0o400
+
+      initContainers:
+      # InitContainer 1: Sync config files from S3
+      - name: gitlab-config-cloner
+        image: alpine/git:latest
+          # A common image with git. Others: bitnami/git, registry.k8s.io/git-sync/git-sync
+          # To ensure SSH client has correct permissions and config:
+          # We will create a custom SSH script that git will use.
+        env:
+        - name: GIT_SSH_COMMAND
+          value: "ssh -o UserKnownHostsFile=/etc/git-secret/known_hosts -i /etc/git-secret/ssh-privatekey"
+            # For git-sync image, you might use its specific env vars like GIT_SYNC_REPO, GIT_SYNC_BRANCH, GIT_SYNC_ROOT, etc.
+            # and it handles the SSH key via /etc/git-secret/ssh
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e  # Exit immediately if a command exits with a non-zero status.
+          set -x  # Print each command before executing it (for debugging, can be removed in production).
+
+          # Install rsync
+          apk add --no-cache rsync
+
+          CONFIG_DIR="/config"
+          REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
+          TEMP_CLONE_DIR="/tmp/git-repo-clone"
+          SOURCE_SUBDIR_IN_REPO="config/metadata"
+
+          echo "Preparing configuration directory: $CONFIG_DIR for repository $REPO_URL"
+
+          # Clean the target /config directory (mounted PVC) before syncing.
+          # This ensures it only contains files from the current version of the repo's metadata.
+          if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
+            echo "Configuration directory $CONFIG_DIR is not empty. Cleaning its contents..."
+            # Remove all files and subdirectories within $CONFIG_DIR without deleting $CONFIG_DIR itself.
+            find "$CONFIG_DIR" -mindepth 1 -delete
+          else
+            echo "Configuration directory $CONFIG_DIR is already empty or does not exist (it will be created by the mount)."
+          fi
+          # Ensure $CONFIG_DIR exists (it's a mount point, so it should, but good to be safe)
+          mkdir -p "$CONFIG_DIR"
+
+          echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
+          # Clone the full repository into a temporary directory. --depth 1 for shallow clone.
+          git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
+
+          REPO_SOURCE_PATH="$TEMP_CLONE_DIR/$SOURCE_SUBDIR_IN_REPO"
+
+          if [ -d "$REPO_SOURCE_PATH" ]; then
+            echo "Syncing contents of $REPO_SOURCE_PATH to $CONFIG_DIR using rsync..."
+            # Use rsync to copy the contents of the 'metadata' subdirectory to '/config'
+            # The trailing slash on the source path is important for rsync to copy the *contents*
+            # '--delete' makes it behave like 'aws s3 sync --delete' or 'rsync --delete'
+            rsync -av --delete "$REPO_SOURCE_PATH/" "$CONFIG_DIR/"
+            echo "Successfully synced '$SOURCE_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
+          else
+            echo "Error: Source subdirectory '$SOURCE_SUBDIR_IN_REPO' not found in the cloned repository at $TEMP_CLONE_DIR."
+            # If the metadata folder is optional, you might not want to exit 1 here.
+            # For critical config, exiting is appropriate.
+            exit 1
+          fi
+
+          echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
+          rm -rf "$TEMP_CLONE_DIR"
+
+          echo "Git clone and sync of '$SOURCE_SUBDIR_IN_REPO' completed successfully."
+          echo "Final contents of $CONFIG_DIR:"
+          ls -la "$CONFIG_DIR"
+        volumeMounts:
+        - name: git-ssh-auth
+          mountPath: /etc/git-secret # This is where the secret's keys will appear as files        
+          readOnly: true
+        - name: ethereum-config # Mount the config PVC
+          mountPath: /config
+      # InitContainer 2: Initialize Geth data directory if needed
+      - name: wait-for-geth
+        image: busybox:1.36
+        command: [ 'sh', '-c', 'until nc -z -w 2 geth-0.geth 8551; do echo waiting for geth; sleep 2; done;' ]
+      # InitContainer 3: Get NodePort and External IP
+      - name: wait-for-loadbalancer-ip
+        image: docker.io/bitnami/kubectl:1.32
+        env:
+        - name: POD_NAME # Injected by Downward API
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE # Injected by Downward API
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e # Exit immediately if a command exits with a non-zero status.
+          SERVICE_NAME="${POD_NAME}" # Assumes your LoadBalancer service is named the same as the pod (e.g., geth-0)
+          NAMESPACE="${POD_NAMESPACE}"
+          RETRY_INTERVAL=10 # seconds
+          MAX_RETRIES=36 # 36 retries * 10 seconds = 6 minutes timeout
+          OUTPUT_FILE="/env/load_balancer.env"
+
+          echo "Starting: Wait for LoadBalancer endpoint for service $SERVICE_NAME in namespace $NAMESPACE (dedicated to pod $POD_NAME)..."
+
+          LB_ENDPOINT=""
+          RETRY_COUNT=0
+
+          while [ -z "$LB_ENDPOINT" ] && [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
+            # Try to get IP first
+            LB_ENDPOINT=$(kubectl get service "$SERVICE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+
+            if [ -z "$LB_ENDPOINT" ]; then
+              # If IP is not found, try hostname
+              LB_ENDPOINT=$(kubectl get service "$SERVICE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            fi
+
+            if [ -z "$LB_ENDPOINT" ]; then
+              RETRY_COUNT=$((RETRY_COUNT+1))
+              echo "LoadBalancer endpoint not yet available for $SERVICE_NAME. Retrying in $RETRY_INTERVAL seconds... (Attempt ${RETRY_COUNT}/${MAX_RETRIES})"
+              sleep "$RETRY_INTERVAL"
+            else
+              echo "Successfully retrieved LoadBalancer endpoint for $SERVICE_NAME: $LB_ENDPOINT"
+            fi
+          done
+
+          if [ -z "$LB_ENDPOINT" ]; then
+            echo "Error: Failed to get LoadBalancer endpoint for $SERVICE_NAME after $MAX_RETRIES attempts. Exiting."
+            exit 1
+          fi
+
+          # Check if LB_ENDPOINT is an IP address or a hostname
+          RESOLVED_IP="$LB_ENDPOINT"
+          # Basic regex for IP address
+          if ! echo "$LB_ENDPOINT" | grep -E -q '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+            echo "Endpoint $LB_ENDPOINT is a hostname. Resolving to IP address..."
+            # Using 'getent hosts' which is generally available. It might return multiple IPs; we take the first.
+            # The bitnami/kubectl image is Debian-based and should have getent.
+            IP_FROM_GETENT=$(getent hosts "$LB_ENDPOINT" | awk '{ print $1 }' | head -n 1)
+
+            if [ -z "$IP_FROM_GETENT" ]; then
+              echo "Warning: 'getent hosts' failed to resolve $LB_ENDPOINT. Trying 'nslookup'..."
+              # nslookup might not be in bitnami/kubectl by default, consider adding 'dnsutils' or using an image like alpine/k8s and 'apk add bind-tools'
+              # For simplicity, we'll assume getent works or the LB provides an IP directly.
+              # If nslookup is needed and not present, this part will fail.
+              # Example: IP_FROM_NSLOOKUP=$(nslookup "$LB_ENDPOINT" | awk '/^Address: / { print $2 }' | tail -n1)
+              # For now, if getent fails with a hostname, we error out.
+              echo "Error: Could not resolve hostname $LB_ENDPOINT using getent. Please ensure DNS resolution tools are available in the init container or the LB provides an IP."
+              exit 1
+            fi
+            RESOLVED_IP="$IP_FROM_GETENT"
+            echo "Resolved $LB_ENDPOINT to $RESOLVED_IP"
+          fi
+
+          echo "Final LoadBalancer IP for $POD_NAME (via $SERVICE_NAME) is: $RESOLVED_IP"
+          echo "export EXTERNAL_IP=\"${RESOLVED_IP}\"" > "${OUTPUT_FILE}"
+          echo "LoadBalancer IP written to ${OUTPUT_FILE}:"
+          cat "${OUTPUT_FILE}"
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /env
+          name: env-share
+
+      containers:
+      - name: beacon
+        image: sigp/lighthouse:latest-unstable
+        command:
+        - /bin/sh
+        - -c
+        args:
+        - |
+          set -e # Exit on error
+          echo "Sourcing LoadBalancer IP from /env/load_balancer.env"
+          if [ -f /env/load_balancer.env ]; then
+            . /env/load_balancer.env # Source the file to get EXTERNAL_IP
+          else
+            echo "Error: /env/load_balancer.env not found. Cannot determine external IP."
+            exit 1
+          fi
+
+          if [ -z "$EXTERNAL_IP" ]; then
+            echo "Error: EXTERNAL_IP variable not set after sourcing. Cannot start Geth."
+            exit 1
+          fi
+
+          echo "Starting Beacon with --enr-address=${EXTERNAL_IP}"
+          # Note: $(CHAIN_ID) will be expanded if CHAIN_ID is an environment variable available to this shell.
+          # Ensure CHAIN_ID is correctly populated from the envFrom configMapRef.        
+          exec lighthouse \
+            beacon_node \
+            --datadir=/consensus-data \
+            --disable-peer-scoring \
+            --disable-packet-filter \
+            --enable-private-discovery \
+            --staking \
+            --http \
+            --http-address=0.0.0.0 \
+            --http-port=5052 \
+            --validator-monitor-auto \
+            --http-allow-origin=* \
+            --listen-address=0.0.0.0 \
+            --enr-address=${EXTERNAL_IP} \
+            --enr-tcp-port=9000 \
+            --enr-udp-port=9000 \
+            --port=9000 \
+            --target-peers=100 \
+           --testnet-dir=/config \
+           --execution-endpoints=http://geth-0.geth:8551 \
+           --jwt-secrets=/secret/jwtsecret \
+           --suggested-fee-recipient=$(FEE_RECIPIENT) \
+           --allow-insecure-genesis-sync \
+           --metrics
+        ports:
+        - containerPort: 5052
+          name: http
+        - containerPort: 9000
+          name: p2p-tcp
+          protocol: TCP
+        - containerPort: 9000
+          name: p2p-udp
+          protocol: UDP
+        - containerPort: 5054
+          name: metrics
+          protocol: TCP
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        envFrom:
+        - configMapRef:
+            name: env-vars # Load FEE_RECIPIENT etc.
+        volumeMounts:
+        - name: consensus-data # Mount consensus data PVC
+          mountPath: /consensus-data
+        - name: lighthouse-data # Mount lighthouse internal data PVC
+          mountPath: /root/.lighthouse # Default path for lighthouse state
+        - name: ethereum-config # Mount shared config PVC
+          mountPath: /config
+        - name: env-share # Mount the shared volume to read the IP
+          mountPath: /env
+        - name: jwtsecret-volume
+          mountPath: "/secret"
+          readOnly: true
+        # - name: jwt-secret-volume
+        #   mountPath: "/secret"
+        #   readOnly: true
+        # readinessProbe:
+        #   httpGet:
+        #     path: /lighthouse/health
+        #     port: http-api
+        #   initialDelaySeconds: 30
+        #   periodSeconds: 30
+        # livenessProbe:
+        #   httpGet:
+        #     path: /lighthouse/health
+        #     port: http-api
+        #   initialDelaySeconds: 30
+        #   periodSeconds: 30
+  volumeClaimTemplates:
+  - metadata:
+      name: ethereum-config
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: gp2
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: consensus-data # PVC for consensus chain data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: gp3 # Or your preferred StorageClass
+      resources:
+        requests:
+          storage: 200Gi # Adjust size as needed
+  # - metadata:
+  #     name: lighthouse-data
+  #   spec:
+  #     accessModes: [ "ReadWriteOnce" ]
+  #     storageClassName: gp3
+  #     resources:
+  #       requests:
+  #         storage: 50Gi

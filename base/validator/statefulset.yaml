@@ -1,0 +1,216 @@
+apiVersion: apps/v1
+kind: StatefulSet # Using StatefulSet for stable storage for slashing protection
+metadata:
+  name: validator
+  namespace: ethereum
+spec:
+  serviceName: validator
+  replicas: 1 # Typically 1 validator client instance per node setup
+  selector:
+    matchLabels:
+      app: validator
+  template:
+    metadata:
+      labels:
+        app: validator
+    spec:
+      serviceAccountName: validator # Only if validator needs direct S3 access
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: validator-keys
+      - name: ethereum-config
+      - name: git-ssh-auth
+        secret:
+          secretName: gitlab-repo-ssh-key
+          defaultMode: 0o400
+      - name: jwtsecret-volume
+        secret:
+          secretName: jwtsecret
+          defaultMode: 0o400
+      # - name: jwt-secret-volume # Match the volume mount name
+      #   csi:
+      #     driver: secrets-store.csi.k8s.io
+      #     readOnly: true
+      #     volumeAttributes:
+      #       secretProviderClass: "jwt-secret" # Match the name of your SecretProviderClass
+      initContainers:
+      # - name: s3-config-sync
+      #   image: amazon/aws-cli:latest
+      #   command: [ "/bin/sh", "-c" ]
+      #   args:
+      #   - >
+      #     aws s3 sync s3://domecloud-ethereum-config-dev/config/metadata /config --delete --exact-timestamps && echo "S3 sync config completed successfully." 
+      #   env:
+      #   - name: AWS_REGION
+      #     value: "ap-southeast-1" # S3 bucket's region
+      #   volumeMounts:
+      #   - name: ethereum-config
+      #     mountPath: /config
+
+      # InitContainer 2: Initialize Geth data directory if needed  
+      # - name: s3-config-sync-vc
+      #   image: amazon/aws-cli:latest
+      #   command: [ "/bin/sh", "-c" ]
+      #   args:
+      #   - >
+      #     aws s3 sync s3://domecloud-ethereum-config-dev/vc/data /validator-keys --delete --exact-timestamps && echo "S3 sync vc data completed successfully."
+      #   env:
+      #   - name: AWS_REGION
+      #     value: "ap-southeast-1" # S3 bucket's region
+      #   volumeMounts:
+      #   - name: validator-keys
+      #     mountPath: /validator-keys
+      - name: gitlab-config-cloner
+        image: alpine/git:latest
+          # A common image with git. Others: bitnami/git, registry.k8s.io/git-sync/git-sync
+          # To ensure SSH client has correct permissions and config:
+          # We will create a custom SSH script that git will use.
+        env:
+        - name: GIT_SSH_COMMAND
+          value: "ssh -o UserKnownHostsFile=/etc/git-secret/known_hosts -i /etc/git-secret/ssh-privatekey"
+            # For git-sync image, you might use its specific env vars like GIT_SYNC_REPO, GIT_SYNC_BRANCH, GIT_SYNC_ROOT, etc.
+            # and it handles the SSH key via /etc/git-secret/ssh
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e  # Exit immediately if a command exits with a non-zero status.
+          set -x  # Print each command before executing it (for debugging, can be removed in production).
+
+          # Install rsync
+          apk add --no-cache rsync
+
+          CONFIG_DIR="/config"
+          KEYS_DIR="/validator-keys"
+          REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
+          TEMP_CLONE_DIR="/tmp/git-repo-clone"
+          CONFIG_SUBDIR_IN_REPO="config/metadata"
+          KEYS_SUBDIR_IN_REPO="vc/data"
+
+          echo "Preparing configuration directory: $CONFIG_DIR for repository $REPO_URL"
+
+          # Clean the target /config directory (mounted PVC) before syncing.
+          # This ensures it only contains files from the current version of the repo's metadata.
+          if [ -d "$CONFIG_DIR" ] && [ "$(ls -A $CONFIG_DIR)" ]; then
+            echo "Configuration directory $CONFIG_DIR is not empty. Cleaning its contents..."
+            # Remove all files and subdirectories within $CONFIG_DIR without deleting $CONFIG_DIR itself.
+            find "$CONFIG_DIR" -mindepth 1 -delete
+          else
+            echo "Configuration directory $CONFIG_DIR is already empty or does not exist (it will be created by the mount)."
+          fi
+          # Ensure $CONFIG_DIR exists (it's a mount point, so it should, but good to be safe)
+          mkdir -p "$CONFIG_DIR"
+
+          echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
+          # Clone the full repository into a temporary directory. --depth 1 for shallow clone.
+          git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
+
+          REPO_CONFIG_SOURCE_PATH="$TEMP_CLONE_DIR/$CONFIG_SUBDIR_IN_REPO"
+          REPO_KEYS_SOURCE_PATH="$TEMP_CLONE_DIR/$KEYS_SUBDIR_IN_REPO"
+
+          if [ -d "$REPO_CONFIG_SOURCE_PATH" ]; then
+            echo "Syncing contents of $REPO_SOURCE_PATH to $CONFIG_DIR using rsync..."
+            # Use rsync to copy the contents of the 'metadata' subdirectory to '/config'
+            # The trailing slash on the source path is important for rsync to copy the *contents*
+            # '--delete' makes it behave like 'aws s3 sync --delete' or 'rsync --delete'
+            rsync -av --delete "$REPO_CONFIG_SOURCE_PATH/" "$CONFIG_DIR/"
+            echo "Successfully synced '$CONFIG_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
+          else
+            echo "Error: Source subdirectory '$REPO_CONFIG_SOURCE_PATH' not found in the cloned repository at $TEMP_CLONE_DIR."
+            # If the metadata folder is optional, you might not want to exit 1 here.
+            # For critical config, exiting is appropriate.
+            exit 1
+          fi
+
+          if [ -d "$REPO_KEYS_SOURCE_PATH" ]; then
+            echo "Syncing contents of $REPO_KEYS_SOURCE_PATH to $KEYS_DIR using rsync..."
+            rsync -av --delete "$REPO_KEYS_SOURCE_PATH/" "$KEYS_DIR/"
+            echo "Successfully synced '$KEYS_SUBDIR_IN_REPO' contents to $KEYS_DIR."            
+          else
+            echo "Error: Source subdirectory '$REPO_KEYS_SOURCE_PATH' not found in the cloned repository at $TEMP_CLONE_DIR."
+            # If the metadata folder is optional, you might not want to exit 1 here.
+            # For critical config, exiting is appropriate.
+            exit 1
+          fi
+
+          echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
+          rm -rf "$TEMP_CLONE_DIR"
+
+          echo "Git clone and sync of '$CONFIG_SUBDIR_IN_REPO' completed successfully."
+          echo "Final contents of $CONFIG_DIR:"
+          ls -la "$CONFIG_DIR"
+
+          echo "Git clone and sync of '$KEYS_SUBDIR_IN_REPO' completed successfully."
+          echo "Final contents of $KEYS_DIR:"
+          ls -la "$KEYS_DIR"          
+        volumeMounts:
+        - name: git-ssh-auth
+          mountPath: /etc/git-secret # This is where the secret's keys will appear as files        
+          readOnly: true
+        - name: ethereum-config # Mount the config PVC
+          mountPath: /config
+        - name: validator-keys
+          mountPath: /validator-keys
+
+      - name: wait-for-beacon
+        image: busybox:1.36
+        command: [ 'sh', '-c', 'until nc -z -w 2 beacon-0.beacon 5052; do echo waiting for beacon; sleep 2; done;' ]
+
+      containers:
+      - name: validator
+        image: sigp/lighthouse:latest-unstable
+        command:
+        - lighthouse
+        - vc # validator_client
+        - --debug-level=info
+        - --testnet-dir=/config
+        - --validators-dir=/validator-keys/keys
+        - --secrets-dir=/validator-keys/secrets
+        - --init-slashing-protection # Initialize slashing protection DB
+        - --beacon-nodes=http://beacon-0.beacon:5052
+        - --suggested-fee-recipient=$(FEE_RECIPIENT)
+        # No ports exposed by default validator client typically
+        envFrom:
+        - configMapRef:
+            name: env-vars # Load FEE_RECIPIENT etc.
+        volumeMounts:
+        - name: validator-keys # Mount the PVC for keys/secrets/slashing data
+          mountPath: /validator-keys
+        - name: ethereum-config # Mount shared config PVC
+          mountPath: /config
+          readOnly: true
+        - name: jwtsecret-volume
+          mountPath: "/secret"
+          readOnly: true
+        # - name: jwt-secret-volume
+        #   mountPath: "/secret"
+        #   readOnly: true
+        # readinessProbe:
+        #   httpGet:
+        #     path: /lighthouse/health
+        #     port: http-api
+        #   initialDelaySeconds: 30
+        #   periodSeconds: 30
+        # livenessProbe:
+        #   httpGet:
+        #     path: /lighthouse/health
+        #     port: http-api
+        #   initialDelaySeconds: 30
+        #   periodSeconds: 30
+  volumeClaimTemplates:
+  - metadata:
+      name: ethereum-config
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: gp2
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: validator-keys
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: gp3
+      resources:
+        requests:
+          storage: 10Gi # Adjust size as needed

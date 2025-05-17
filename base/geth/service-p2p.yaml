@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: geth-0
+  annotations:
+    #service.beta.kubernetes.io/aws-load-balancer-name: "geth-0"
+    # 1. Specify that AWS Load Balancer Controller should manage this service
+    # For NLB, typically "external" or "nlb-ip"
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb-ip" # or "external"
+
+    # 2. Specify the scheme of the Load Balancer (internet-facing for public EIPs)
+    # service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+
+    # 3. Provide the Allocation IDs of your pre-allocated Elastic IPs
+    # Comma-separated list if using multiple EIPs
+    #service.beta.kubernetes.io/aws-load-balancer-eip-allocations: "eipalloc-01a33d4c4f9711ec5,eipalloc-00d37f43634fba694"
+
+    # 4. (Optional but Recommended) Specify subnets for the NLB
+    # Ensure these subnets are tagged correctly for auto-discovery by AWS Load Balancer Controller
+    # or explicitly list them. The number of EIPs in eip-allocations must match the number of subnets.
+    #service.beta.kubernetes.io/aws-load-balancer-subnets: "subnet-060b7e02d3f3dc24f,subnet-0762610e8c66469d2i"
+    #service.beta.kubernetes.io/aws-load-balancer-private-ipv4-addresses: "10.0.12.95"
+
+    # 5. (Optional) Specify the target type for the NLB (ip or instance)
+    # 'ip' mode routes traffic directly to Pod IPs. Requires VPC CNI.
+    # 'instance' mode routes traffic to NodePorts on worker nodes.
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip # or "instance"
+    service.beta.kubernetes.io/aws-load-balancer-proxy-protocol: "*"
+    # 6. (Optional) Other useful annotations for NLBs:
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    # service.beta.kubernetes.io/aws-load-balancer-proxy-protocol: "*" # Enable proxy protocol v2
+    # service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "TCP" # Or HTTP, HTTPS
+    # service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "traffic-port" # Or a specific port
+    # service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/healthz" # If using HTTP/S    
+spec:
+  type: LoadBalancer
+  selector:
+    app: geth
+    statefulset.kubernetes.io/pod-name: geth-0
+  ports:
+  - name: p2p-tcp
+    port: 30303
+    protocol: TCP
+    targetPort: p2p-tcp
+  - name: p2p-udp
+    port: 30303
+    protocol: UDP
+    targetPort: p2p-udp

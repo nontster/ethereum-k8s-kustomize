@@ -1,0 +1,32 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: beacon
+spec:
+  groups:
+  - name: lighthouse-default
+    rules:
+    - alert: LighthouseBeaconNodeDown
+      annotations:
+        description: Check {{ $labels.pod }} beacon node in namespace {{ $labels.namespace }}
+        summary: Lighthouse beacon node is down
+      expr: up{job='lighthouse'} == 0
+      for: 1m
+      labels:
+        severity: critical
+    - alert: LighthouseBeaconNodeIsNotConnectedToEth1Node
+      annotations:
+        description: Check {{ $labels.pod }} beacon node in namespace {{ $labels.namespace }}
+        summary: Lighthouse beacon node is not connected to eth1 node
+      expr: sync_eth1_connected{job='lighthouse'} == 0
+      for: 1m
+      labels:
+        severity: critical
+    - alert: LighthouseBeaconNodeIsOutOfSync
+      annotations:
+        description: Check {{ $labels.pod }} beacon node in namespace {{ $labels.namespace }}
+        summary: Lighthouse beacon node is out of sync
+      expr: sync_eth2_synced{job='lighthouse'} == 0
+      for: 3m
+      labels:
+        severity: critical

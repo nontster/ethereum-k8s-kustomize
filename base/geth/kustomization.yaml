@@ -1,0 +1,8 @@
+resources:
+- service.yaml
+- service-p2p.yaml
+- sa.yaml
+- rolebinding.yaml
+- statefulset.yaml
+- servicemonitor.yaml
+- prometheusrules.yaml

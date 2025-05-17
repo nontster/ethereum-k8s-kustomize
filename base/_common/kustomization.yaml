@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- namespace.yaml
+- role.yaml
+- secrets.yaml
+# - secretproviderclass.yaml
+
+configMapGenerator:
+- name: env-vars
+  literals:
+  - CHAIN_ID=9555
+  - FEE_RECIPIENT=0x5F920028E98ab2d1d6c6Cf4E4B41a07F4bB55555

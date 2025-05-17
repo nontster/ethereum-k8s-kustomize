@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: beacon
+  labels:
+    app: beacon # This label must match ServiceMonitor selector  
+spec:
+  selector:
+    app: beacon
+  type: ClusterIP
+  clusterIP: None
+  ports:
+  - name: http
+    port: 5052
+    targetPort: http
+  - name: metrics
+    port: 5054
+    targetPort: metrics

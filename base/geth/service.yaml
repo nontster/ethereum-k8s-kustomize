@@ -1,0 +1,34 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: geth
+  labels:
+    app: geth # This label must match ServiceMonitor selector  
+spec:
+  sessionAffinity: None
+  type: ClusterIP
+  clusterIP: None
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: auth-rpc
+    port: 8551
+    protocol: TCP
+    targetPort: auth-rpc
+  - name: http-rpc
+    port: 8545
+    protocol: TCP
+    targetPort: http-rpc
+  - name: ws-rpc
+    port: 8546
+    protocol: TCP
+    targetPort: ws-rpc
+  - name: metrics
+    port: 6060
+    protocol: TCP
+    targetPort: metrics
+  selector:
+    app: geth

@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: geth
+spec:
+  groups:
+  - name: geth-default
+    rules:
+    - alert: GethNodeDown
+      annotations:
+        description: Geth Node {{ $labels.instance }} is down
+        summary: Geth Node {{ $labels.instance }} down
+      expr: up{job="geth"} == 0
+      for: 5m
+      labels:
+        severity: critical

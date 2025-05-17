@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: beacon
+spec:
+  endpoints:
+  - interval: 15s
+    path: /metrics
+    port: metrics
+  namespaceSelector:
+    matchNames:
+    - ethereum
+  selector:
+    matchLabels:
+      app: beacon
