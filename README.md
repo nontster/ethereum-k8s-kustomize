@@ -136,9 +136,7 @@ git push
 
 จะได้ไฟล์ใน Remote git repository ดังตัวอย่างในภาพ 
 
-  * config 
-  * vc/data 
-  * README.md 
+![Git remote repository](./images/img_2.png)
 
 ## การ Deploy Ethereum node ใน EKS Cluster
 
@@ -325,4 +323,7 @@ configMapGenerator:
     ```
 
     adminUser: admin
+    
     adminPassword: prom-operator 
+
+    ![Geth dashboard](./images/img_3.png)
