@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: StatefulSet # Using StatefulSet for stable storage for slashing protection
 metadata:
   name: validator
-  namespace: ethereum
 spec:
   serviceName: validator
   replicas: 1 # Typically 1 validator client instance per node setup

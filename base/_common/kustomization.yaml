@@ -16,9 +16,9 @@ configMapGenerator:
   - FEE_RECIPIENT=0x5F920028E98ab2d1d6c6Cf4E4B41a07F4bB55555
 - name: external-network-config
   literals:
-  - GETH_EXTERNAL_IP="10.0.8.109"
+  - GETH_EXTERNAL_IP="10.0.7.145"
   - GETH_EXTERNAL_PORT="31100"
-  - BEACON_EXTERNAL_IP="10.0.8.109"
+  - BEACON_EXTERNAL_IP="10.0.7.145"
   - BEACON_EXTERNAL_PORT="31300"
 - name: git-repo-config
   literals:

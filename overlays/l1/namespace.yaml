@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ethereum-l1
+  # You can add overlay-specific labels or annotations here if needed
+  labels:
+    environment: dev

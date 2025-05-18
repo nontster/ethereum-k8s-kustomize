@@ -7,9 +7,9 @@ spec:
   - interval: 15s
     path: /metrics
     port: metrics
-  namespaceSelector:
-    matchNames:
-    - ethereum
+  # namespaceSelector:
+  #   matchNames:
+  #   - ethereum
   selector:
     matchLabels:
       app: beacon

@@ -7,9 +7,9 @@ spec:
   - interval: 15s
     path: /debug/metrics/prometheus
     port: metrics
-  namespaceSelector:
-    matchNames:
-    - ethereum
+  # namespaceSelector:
+  #   matchNames:
+  #   - ethereum-l1
   selector:
     matchLabels:
       app: geth

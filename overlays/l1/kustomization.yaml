@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ethereum-l1
+
+resources:
+#- namespace.yaml
+- ../../base/_common
+- ../../base/geth
+- ../../base/beacon
+- ../../base/validator
+
+patches:
+- target:
+    kind: Namespace
+    name: ethereum # Target the original Namespace resource named 'ethereum'
+  patch: |-
+    - op: replace
+      path: /metadata/name
+      value: ethereum-l1
