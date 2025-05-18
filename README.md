@@ -106,7 +106,7 @@ kubectl create secret generic jwtsecret --from-literal=jwtsecret=$JWT --dry-run 
 
 ## ขั้นตอนที่ 4: สร้าง configuration ตั้งต้นสำหรับ execution client consensus client และ validator client 
 
-Clone git repository เช่นในตัวอย่างใช้ 
+Clone git repository จาก private Gitlab repository ที่เตรียมไว้ เช่นในตัวอย่างใช้ https://gitlab.com/nontster/ethereum_bootstrap 
 
 ```bash
 git clone git@gitlab.com:nontster/ethereum_bootstrap.git
@@ -158,12 +158,11 @@ code . # เปิด vscode เพื่อแก้ไข
 apiversion: kustomize.config.k8s.io/vlbetal
 kind: Kustomization
 resources:
-# namespace.yaml
-# role.yaml
-# secrets.yaml
-# pv.yaml
-# pvc.yaml
-# secretproviderclass.yaml
+- namespace.yaml
+- role.yaml
+- secrets.yaml
+- pv.yaml
+- pvc.yaml
 configMapGenerator:
   name: env-vars
   literals:
@@ -180,7 +179,7 @@ configMapGenerator:
     - GIT_REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
 ```
 
-1.  แก้ไข `CHAIN_ID` `FEE_RECIPIENT` (`WITHDRAWAL_ADDRESS` ใน `values.env`) 
+1.  แก้ไข `CHAIN_ID` `FEE_RECIPIENT` (ใช้ค่าจาก `WITHDRAWAL_ADDRESS` ใน `values.env`) 
 
 2.  แก้ไข `GETH_EXTERNAL_IP` `BEACON_EXTERNAL_IP` โดยใช้ IP ของ EKS worker node 
 
@@ -325,5 +324,5 @@ configMapGenerator:
     kubectl port-forward svc/kube-prometheus-stack-grafana 8080:80 -n monitoring
     ```
 
-    adminUser: admin 
+    adminUser: admin
     adminPassword: prom-operator 
