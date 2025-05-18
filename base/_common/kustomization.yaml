@@ -20,3 +20,6 @@ configMapGenerator:
   - GETH_EXTERNAL_PORT="31100"
   - BEACON_EXTERNAL_IP="10.0.8.109"
   - BEACON_EXTERNAL_PORT="31300"
+- name: git-repo-config
+  literals:
+  - GIT_REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"

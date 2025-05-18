@@ -9,6 +9,9 @@ metadata:
 spec:
   sessionAffinity: None
   type: NodePort
+  selector:
+    app: beacon
+    statefulset.kubernetes.io/pod-name: beacon-0
   ports:
   - name: p2p-tcp
     nodePort: 31300
@@ -20,6 +23,3 @@ spec:
     port: 9000
     protocol: UDP
     targetPort: p2p-udp
-  selector:
-    app: beacon
-    statefulset.kubernetes.io/pod-name: beacon-0
