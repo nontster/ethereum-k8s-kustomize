@@ -297,10 +297,10 @@ configMapGenerator:
 
     ```
     NAME         READY   STATUS      RESTARTS   AGE
-    beacon-0     Init:0/1   0/1      0          15s
+    beacon-0     Init: 0/1   0/1      0          15s
     geth-0       Init: 0/2   0/1      0          15s
     validator-0  Init: 0/1   0/1      0          15s
-    beacon-0     Init:0/1   0/1      0          17s
+    beacon-0     Init: 0/1   0/1      0          17s
     validator-0  Init: 0/1   0/1      0          17s
     geth-0       Init: 0/2   0/1      0          18s
     geth-0       0/1     Init:1/2   0          27s
