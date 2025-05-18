@@ -4,7 +4,6 @@ kind: Kustomization
 namespace: ethereum-l1
 
 resources:
-#- namespace.yaml
 - ../../base/_common
 - ../../base/geth
 - ../../base/beacon

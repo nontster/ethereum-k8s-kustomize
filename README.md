@@ -82,7 +82,7 @@ ssh-keyscan gitlab.com
 kubectl create secret generic gitlab-repo-ssh-key \
  --from-file=ssh-privatekey=./gitlab-k8s-key \
  --from-literal=known_hosts='gitlab.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCsj2bNKTBSPIYDEGk9KxsGh3mySTRgMtXL583qmBp zeQ+jqCMRgBqB98u3z++J1sK1XHWfM9dyhSevkMwSbhoR8XIq/U0tCNyokEi/ueaBMCvbcT Hh07FcwzY92WK4Yt0aGROY5qX2UKSeOvuP4D6TPqKF1onrSzH9bx9XUf21EdWT/ia1NEKju nUqu1x0B/StKDHMOX4/OKyIzuS0q/T1z0ATthvasJFoPrAjkohTyaDUz2LN5JoH839hViyE G82yB+MjcFV5MU3N111QL3cVUCh93xSaua1N85qivl+siMkPGb05xR/En4iEY6K2XPASUEM aieWVNTRCtJ4S8H+9' \
- --namespace ethereum-dry-run=client -o yaml | pbcopy # macOS
+ --dry-run=client -o yaml | pbcopy # macOS
 ```
 
 นำ output ที่ได้ไปใส่ในไฟล์ `_common/secrets.yaml` แทนที่ secret ชื่อ `gitlab-repo-ssh-key` เช่น 
@@ -129,6 +129,10 @@ mkdir -p config
 ```bash
 sh generate_genesis_data-el.sh
 sh generate_genesis_data.sh
+```
+
+จากนั้น commit change และ push ไปที่ remote repostiory 
+```bash
 git add .
 git commit -m "Initial"
 git push
@@ -179,7 +183,11 @@ configMapGenerator:
 
 1.  แก้ไข `CHAIN_ID` `FEE_RECIPIENT` (ใช้ค่าจาก `WITHDRAWAL_ADDRESS` ใน `values.env`) 
 
-2.  แก้ไข `GETH_EXTERNAL_IP` `BEACON_EXTERNAL_IP` โดยใช้ IP ของ EKS worker node 
+2.  แก้ไข `GETH_EXTERNAL_IP` `BEACON_EXTERNAL_IP` โดยใช้ IP ของ EKS worker node ซึ่งหาได้จากคำสั่ง 
+```bash
+kubectl get nodes -o wide
+``` 
+ใน EKS cluster จะแสดงเฉพาะ worker node สามารถเลือกใช้ IP จาก code ใดก็ได้
 
 3.  สำหรับ `GETH_EXTERNAL_PORT` `BEACON_EXTERNAL_PORT` ถ้าไม่ซ้ำกับ NodePort อื่นใน cluster ก็ไม่จำเป็นต้องเปลี่ยน แต่ถ้าต้องเปลี่ยนให้ตามไปเปลี่ยน nodePort ใน `base/geth/service-p2p.yaml` และ `base/beacon/service-p2p.yaml` ให้ตรงกันด้วย 
 
@@ -223,16 +231,34 @@ configMapGenerator:
           storage: 10Gi
     ```
 
-6.  ใน `namespace.yaml` แก้ไข ชื่อ namespace ที่ต้องการ deploy Ethereum node ลงไป 
+6. หากต้องการเปลี่ยนชื่อ namespace ให้แก้ที่ไฟล์ 
+`overlays/l1/kustomization.yaml` ดังตัวอย่าง
 
-    `base/_common/namespace.yaml` 
+
 
     ```yaml
-    apiversion: v1
-    kind: Namespace
-    metadata:
-      name: ethereum
+    apiVersion: kustomize.config.k8s.io/v1beta1
+    kind: Kustomization
+
+    namespace: ethereum-l1 # <--- แก้ในส่วนนี้
+
+    resources:
+    - ../../base/_common
+    - ../../base/geth
+    - ../../base/beacon
+    - ../../base/validator
+
+    patches:
+    - target:
+        kind: Namespace
+        name: ethereum # Target the original Namespace resource named 'ethereum'
+      patch: |-
+        - op: replace
+          path: /metadata/name
+          value: ethereum-l1 # <--- แก้ในส่วนนี้ี้
+
     ```
+##
 
 ## ขั้นตอนที่ 2: Deploy Ethereum node 
 
@@ -245,7 +271,7 @@ configMapGenerator:
 2.  Deploy 
 
     ```bash
-    kubectl apply -k overlays/dev
+    kubectl apply -k overlays/l1
     ```
 
     OUTPUT: 
@@ -288,7 +314,7 @@ configMapGenerator:
 3.  ดู ว่า pod ถูกสร้างเรียบร้อยหรือไม่ ทุก pod ต้องมีสถานะเป็น Running 
 
     ```bash
-    kubectl get pon ethereum --watch
+    kubectl get po -n ethereum-l1 --watch
     ```
 
     OUTPUT: 
@@ -313,7 +339,7 @@ configMapGenerator:
 4.  ดู Log ของ validator ว่ามี Error หรือไม่ 
 
     ```bash
-    kubectl logs -f validator-0 -n ethereum
+    kubectl logs -f validator-0 -n ethereum-l1
     ```
 
 5.  ถ้าติดตั้ง `kube-prometheus-stack` และ Geth dashboard เอาไว้สามารถตรวจสอบได้โดยดูจาก dashboard 
