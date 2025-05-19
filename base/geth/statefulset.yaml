@@ -16,12 +16,6 @@ spec:
       serviceAccountName: geth # Service Account
       terminationGracePeriodSeconds: 60
       volumes:
-      - name: env-share
-        emptyDir: {}
-      - name: git-ssh-auth
-        secret:
-          secretName: gitlab-repo-ssh-key
-          defaultMode: 0o400
       - name: jwtsecret-volume
         secret:
           secretName: jwtsecret
@@ -34,15 +28,18 @@ spec:
       - name: gitlab-config-cloner
         image: alpine/git:latest
         env:
-        - name: REPO_URL
+        - name: GIT_REPO_BASE_URL
           valueFrom:
             configMapKeyRef:
               name: git-repo-config
               key: GIT_REPO_URL
-        - name: GIT_SSH_COMMAND
-          value: "ssh -o UserKnownHostsFile=/etc/git-secret/known_hosts -i /etc/git-secret/ssh-privatekey"
-            # For git-sync image, you might use its specific env vars like GIT_SYNC_REPO, GIT_SYNC_BRANCH, GIT_SYNC_ROOT, etc.
-            # and it handles the SSH key via /etc/git-secret/ssh
+        - name: GIT_ACCESS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitlab-project-token-secret # Your K8s secret name
+              key: token # The key in the secret holding the PAT
+        - name: GITLAB_USER_FOR_TOKEN # Often 'oauth2' or 'gitlab-ci-token' for PATs, but can be any string for PATs when used in URL
+          value: "oauth2" # Using 'oauth2' is a common convention for GitLab tokens
         command:
         - /bin/sh
         - -c
@@ -55,7 +52,6 @@ spec:
 
           CONFIG_DIR="/data/config"
           KEYS_DIR="/data/validator-keys"
-          #REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
           TEMP_CLONE_DIR="/tmp/git-repo-clone"
           CONFIG_SUBDIR_IN_REPO="config/metadata"
           KEYS_SUBDIR_IN_REPO="vc/data"
@@ -63,24 +59,58 @@ spec:
           CLONE_PERFORMED=false
           REPO_CLONED_SUCCESSFULLY=false
 
+          if [ -z "$GIT_REPO_BASE_URL" ]; then
+            echo "Error: GIT_REPO_BASE_URL is not set."
+            exit 1
+          fi
+          if [ -z "$GIT_ACCESS_TOKEN" ]; then
+            echo "Error: GIT_ACCESS_TOKEN is not set. Make sure the secret is correctly mounted."
+            exit 1
+          fi
+
+          CLONE_URL="$GIT_REPO_BASE_URL"
+          GIT_CLONE_COMMAND="git clone --depth 1 --config http.extraHeader=\"PRIVATE-TOKEN: $GIT_ACCESS_TOKEN\" \"$CLONE_URL\" \"$TEMP_CLONE_DIR\""
+
+          echo "GIT_REPO_BASE_URL: $GIT_REPO_BASE_URL"
+
           # Ensure target directories exist (they are mount points from the PVC)
           mkdir -p "$CONFIG_DIR"
           mkdir -p "$KEYS_DIR"
 
           # Function to clone the repository
           clone_repo() {
-            if [ ! -d "$TEMP_CLONE_DIR/.git" ]; then # Check if already cloned properly
-              echo "Cloning repository $REPO_URL into temporary directory $TEMP_CLONE_DIR..."
-              # Clean up any partial clone before attempting a new one
-              rm -rf "$TEMP_CLONE_DIR"
-              git clone --depth 1 "$REPO_URL" "$TEMP_CLONE_DIR"
-              CLONE_PERFORMED=true # Mark that a clone attempt was made
-              REPO_CLONED_SUCCESSFULLY=true # Assume success, will be clear on rsync path check
-              echo "Repository cloned."
+            if [ ! -d "$TEMP_CLONE_DIR/.git" ]; then
+              echo "Cloning repository from $CLONE_URL into temporary directory $TEMP_CLONE_DIR using HTTPS with Project Access Token..."
+              rm -rf "$TEMP_CLONE_DIR" # Clean up any partial clone
+              
+              # Try the preferred method first
+              if eval $GIT_CLONE_COMMAND; then
+                echo "Repository cloned successfully using http.extraHeader."
+                REPO_CLONED_SUCCESSFULLY=true
+              else
+                echo "Failed to clone using http.extraHeader. The token might not have the correct permissions or the GitLab version/configuration doesn't support this well for alpine/git."
+                echo "Attempting fallback method by embedding token in URL (less ideal for .git/config secrecy)..."
+                # Construct the fallback URL here if you want to use it
+                PROTOCOL=$(echo "$GIT_REPO_BASE_URL" | grep -Eo '^https?://')
+                REPO_PATH=$(echo "$GIT_REPO_BASE_URL" | sed -e "s|^$PROTOCOL||") # Remove protocol part
+                CLONE_URL_WITH_TOKEN="${PROTOCOL}${GITLAB_USER_FOR_TOKEN}:${GIT_ACCESS_TOKEN}@${REPO_PATH}"
+                
+                if git clone --depth 1 "$CLONE_URL_WITH_TOKEN" "$TEMP_CLONE_DIR"; then
+                  echo "Repository cloned successfully using token in URL."
+                  REPO_CLONED_SUCCESSFULLY=true
+                else
+                  echo "Error: Failed to clone repository using both methods."
+                  REPO_CLONED_SUCCESSFULLY=false
+                  # Consider exiting if clone is critical: exit 1
+                  return 1 # Indicate failure
+                fi
+              fi
+              CLONE_PERFORMED=true
             else
               echo "Repository already cloned to $TEMP_CLONE_DIR."
-              REPO_CLONED_SUCCESSFULLY=true # Already successfully cloned
+              REPO_CLONED_SUCCESSFULLY=true
             fi
+            return 0
           }
 
           # Process /data/config
@@ -89,21 +119,21 @@ spec:
             echo "Configuration directory $CONFIG_DIR is not empty. Skipping rewrite."
           else
             echo "Configuration directory $CONFIG_DIR is empty or does not exist. Attempting to populate from git."
-            clone_repo # Clone only if needed and not already cloned
-            if [ "$REPO_CLONED_SUCCESSFULLY" = true ]; then
+            if ! clone_repo; then # If clone_repo returned non-zero
+              echo "Aborting population of $CONFIG_DIR due to repository clone failure."
+              # Potentially exit 1 here if this is critical
+            elif [ "$REPO_CLONED_SUCCESSFULLY" = true ]; then
               REPO_CONFIG_SOURCE_PATH="$TEMP_CLONE_DIR/$CONFIG_SUBDIR_IN_REPO"
               if [ -d "$REPO_CONFIG_SOURCE_PATH" ]; then
                 echo "Syncing contents of $REPO_CONFIG_SOURCE_PATH to $CONFIG_DIR using rsync (no delete)..."
-                rsync -av "$REPO_CONFIG_SOURCE_PATH/" "$CONFIG_DIR/" # No --delete
+                rsync -av "$REPO_CONFIG_SOURCE_PATH/" "$CONFIG_DIR/"
                 echo "Successfully synced '$CONFIG_SUBDIR_IN_REPO' contents to $CONFIG_DIR."
               else
                 echo "Error: Source subdirectory '$REPO_CONFIG_SOURCE_PATH' not found in the cloned repository."
                 echo "Configuration directory $CONFIG_DIR will remain empty."
-                # Depending on criticality, you might want to exit 1 here if config is essential on first run
-                # exit 1
               fi
             else
-              echo "Skipping population of $CONFIG_DIR due to repository clone failure."
+              echo "Skipping population of $CONFIG_DIR due to repository clone failure (already logged by clone_repo)."
             fi
           fi
 
@@ -113,26 +143,36 @@ spec:
             echo "Validator keys directory $KEYS_DIR is not empty. Skipping rewrite."
           else
             echo "Validator keys directory $KEYS_DIR is empty or does not exist. Attempting to populate from git."
-            clone_repo # Clone only if needed and not already cloned
+            # clone_repo was already called or attempted. We rely on REPO_CLONED_SUCCESSFULLY.
+            # If it wasn't called because CONFIG_DIR was full, but KEYS_DIR is empty, we need to call it.
+            if [ "$CLONE_PERFORMED" = false ]; then # If clone_repo hasn't been run yet in this script execution
+              if ! clone_repo; then
+                  echo "Aborting population of $KEYS_DIR due to repository clone failure."
+                  # Potentially exit 1 here
+              fi
+            fi
+
             if [ "$REPO_CLONED_SUCCESSFULLY" = true ]; then
               REPO_KEYS_SOURCE_PATH="$TEMP_CLONE_DIR/$KEYS_SUBDIR_IN_REPO"
               if [ -d "$REPO_KEYS_SOURCE_PATH" ]; then
                 echo "Syncing contents of $REPO_KEYS_SOURCE_PATH to $KEYS_DIR using rsync (no delete)..."
-                rsync -av "$REPO_KEYS_SOURCE_PATH/" "$KEYS_DIR/" # No --delete
+                rsync -av "$REPO_KEYS_SOURCE_PATH/" "$KEYS_DIR/"
                 echo "Successfully synced '$KEYS_SUBDIR_IN_REPO' contents to $KEYS_DIR."
               else
                 echo "Error: Source subdirectory '$REPO_KEYS_SOURCE_PATH' not found in the cloned repository."
                 echo "Validator keys directory $KEYS_DIR will remain empty."
-                # Depending on criticality, you might want to exit 1 here if keys are essential on first run
-                # exit 1
               fi
             else
-              echo "Skipping population of $KEYS_DIR due to repository clone failure."
+              echo "Skipping population of $KEYS_DIR due to repository clone failure (already logged by clone_repo or previous step)."
             fi
           fi
 
           if [ "$CLONE_PERFORMED" = true ] && [ -d "$TEMP_CLONE_DIR" ]; then
             echo "Cleaning up temporary clone directory $TEMP_CLONE_DIR..."
+            # If token was embedded in URL, it might be in .git/config.
+            # Securely wiping .git/config before rm -rf could be an option if really concerned,
+            # but the container is ephemeral.
+            # For example: find "$TEMP_CLONE_DIR/.git" -type f -name "config" -exec shred -u {} \;
             rm -rf "$TEMP_CLONE_DIR"
           fi
 
@@ -143,9 +183,6 @@ spec:
           ls -la "$KEYS_DIR" || echo "$KEYS_DIR not listable or empty"
 
         volumeMounts:
-        - name: git-ssh-auth
-          mountPath: /etc/git-secret # This is where the secret's keys will appear as files        
-          readOnly: true
         - name: persistent-storage
           mountPath: /data
 

@@ -18,10 +18,6 @@ spec:
       volumes:
       - name: lighthouse-data
         emptyDir: {}
-      - name: git-ssh-auth
-        secret:
-          secretName: gitlab-repo-ssh-key
-          defaultMode: 0o400
       - name: jwtsecret-volume
         secret:
           secretName: jwtsecret

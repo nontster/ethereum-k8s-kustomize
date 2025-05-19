@@ -16,10 +16,10 @@ configMapGenerator:
   - FEE_RECIPIENT=0x5F920028E98ab2d1d6c6Cf4E4B41a07F4bB55555
 - name: external-network-config
   literals:
-  - GETH_EXTERNAL_IP="10.0.7.145"
+  - GETH_EXTERNAL_IP="10.0.31.6"
   - GETH_EXTERNAL_PORT="31100"
-  - BEACON_EXTERNAL_IP="10.0.7.145"
+  - BEACON_EXTERNAL_IP="10.0.31.6"
   - BEACON_EXTERNAL_PORT="31300"
 - name: git-repo-config
   literals:
-  - GIT_REPO_URL="git@gitlab.com:nontster/ethereum_bootstrap.git"
+  - GIT_REPO_URL="https://gitlab.com/nontster/ethereum_bootstrap.git"
